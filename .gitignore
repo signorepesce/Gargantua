@@ -1,0 +1,8 @@
+/gargantua
+/.build/
+*.gen.c
+*.gen.h
+*.o
+*.db
+*.dSYM/
+.DS_Store
