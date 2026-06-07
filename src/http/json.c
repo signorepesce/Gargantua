@@ -200,3 +200,190 @@ static int token_primitive(const char *js, size_t len, size_t *at, JsonToken *to
     return t;
 }
 
+static int scan_value(const char *js, size_t len, size_t *at, JsonToken *toks, int max, int *count, int parent, Frame *stack, int *depth)
+{
+    if (*at >= len) { return -1; }
+    char c = js[*at];
+    if (c == '"') { return (token_string(js, len, at, toks, max, count, parent) < 0) ? -1 : 0; }
+    if ((c == '{') || (c == '['))
+    {
+        if (*depth >= JSON_MAX_DEPTH) { return -1; }
+        JsonType type = (c == '{') ? JSON_OBJ : JSON_ARR;
+        int t = token_alloc(toks, max, count, type, (int)*at, parent);
+        if (t < 0) { return -1; }
+        stack[*depth].token = t;
+        stack[*depth].type = type;
+        stack[*depth].state = (type == JSON_OBJ) ? OBJ_KEY_OR_END
+                                                 : ARR_VALUE_OR_END;
+        stack[*depth].members = 0;
+        (*depth)++;
+        (*at)++;
+        return 0;
+    }
+    return (token_primitive(js, len, at, toks, max, count, parent) < 0) ? -1 : 0;
+}
+
+static void close_container(JsonToken *toks, const Frame *f, size_t *i, int *depth, int *done)
+{
+    assert(toks != NULL);
+    assert(f != NULL);
+
+    toks[f->token].end = (int)(++(*i));
+    (*depth)--;
+    if (*depth == 0) { *done = 1; }
+}
+
+static int duplicate_key(const char *js, const JsonToken *toks, int parent, int key)
+{
+    assert(js != NULL);
+    assert(toks != NULL);
+
+    char decoded_key[JSON_MAX_KEY_BYTES];
+    json_copy_str(js, &toks[key], decoded_key, sizeof(decoded_key));
+
+    int direct = 0;
+    for (int prior = parent + 1; prior < key; prior++)
+    {
+        if (toks[prior].parent != parent) { continue; }
+
+        if (((direct & 1) == 0) && (toks[prior].type == JSON_STR))
+        {
+            char decoded_prior[JSON_MAX_KEY_BYTES];
+            json_copy_str(js, &toks[prior], decoded_prior, sizeof(decoded_prior));
+            if (strcmp(decoded_prior, decoded_key) == 0) { return 1; }
+        }
+        direct++;
+    }
+
+    return 0;
+}
+
+static int scan_object_key(const char *js, size_t len, size_t *i, JsonToken *toks, int max, int *count, Frame *f, int *depth, int *done)
+{
+    assert(js != NULL);
+    assert(f != NULL);
+
+    if (js[*i] == '}')
+    {
+        if (f->state == OBJ_KEY) { return -1; }
+        close_container(toks, f, i, depth, done);
+        return 0;
+    }
+    if (js[*i] != '"') { return -1; }
+
+    int key = token_string(js, len, i, toks, max, count, f->token);
+    if ((key < 0) || (f->members >= JSON_MAX_OBJECT_KEYS)) { return -1; }
+
+    int key_len = toks[key].end - toks[key].start;
+    if ((key_len < 0) || (key_len >= JSON_MAX_KEY_BYTES)) { return -1; }
+    if (duplicate_key(js, toks, f->token, key) != 0) { return -1; }
+
+    f->members++;
+    f->state = OBJ_COLON;
+
+    return 0;
+}
+
+static int scan_array_element(const char *js, size_t len, size_t *i, JsonToken *toks, int max, int *count, Frame *f, Frame *stack, int *depth, int *done)
+{
+    assert(js != NULL);
+    assert(f != NULL);
+
+    if (js[*i] == ']')
+    {
+        if (f->state == ARR_VALUE) { return -1; }
+        close_container(toks, f, i, depth, done);
+        return 0;
+    }
+
+    f->state = ARR_NEXT;
+
+    return scan_value(js, len, i, toks, max, count, f->token, stack, depth);
+}
+
+static int scan_separator(const char *js, size_t *i, Frame *f, JsonToken *toks, int *depth, int *done, char closer, FrameState next)
+{
+    assert(js != NULL);
+    assert(f != NULL);
+
+    if (js[*i] == ',')
+    {
+        f->state = next;
+        (*i)++;
+        return 0;
+    }
+    if (js[*i] != closer) { return -1; }
+
+    close_container(toks, f, i, depth, done);
+
+    return 0;
+}
+
+static int scan_frame(const char *js, size_t len, size_t *i, JsonToken *toks, int max, int *count, Frame *stack, int *depth, int *done)
+{
+    assert(js != NULL);
+    assert(stack != NULL);
+
+    Frame *f = &stack[*depth - 1];
+
+    switch (f->state)
+    {
+        case OBJ_KEY_OR_END:
+        case OBJ_KEY:
+            return scan_object_key(js, len, i, toks, max, count, f, depth, done);
+
+        case OBJ_COLON:
+            if (js[*i] != ':') { return -1; }
+            f->state = OBJ_VALUE;
+            (*i)++;
+            return 0;
+
+        case OBJ_VALUE:
+            f->state = OBJ_NEXT;
+            return scan_value(js, len, i, toks, max, count, f->token, stack, depth);
+
+        case OBJ_NEXT:
+            return scan_separator(js, i, f, toks, depth, done, '}', OBJ_KEY);
+
+        case ARR_VALUE_OR_END:
+        case ARR_VALUE:
+            return scan_array_element(js, len, i, toks, max, count, f, stack, depth, done);
+
+        case ARR_NEXT:
+            return scan_separator(js, i, f, toks, depth, done, ']', ARR_VALUE);
+
+        default:
+            break;
+    }
+
+    return -1;
+}
+
+int json_parse(const char *js, size_t len, JsonToken *toks, int max)
+{
+    if ((js == NULL) || (toks == NULL) || (max <= 0) || (len == 0u) || (len > (size_t)INT_MAX)) { return -1; }
+
+    Frame  stack[JSON_MAX_DEPTH];
+    int    depth = 0, count = 0, seen = 0, done = 0;
+    size_t i = 0u;
+
+    while (i < len)
+    {
+        while ((i < len) && (is_space((unsigned char)js[i]) == 1)) { i++; }
+        if (i >= len) { break; }
+
+        if (depth == 0)
+        {
+            if ((seen != 0) || (done != 0)) { return -1; }
+            seen = 1;
+            if (scan_value(js, len, &i, toks, max, &count, -1, stack, &depth) != 0) { return -1; }
+            if (depth == 0) { done = 1; }
+            continue;
+        }
+
+        if (scan_frame(js, len, &i, toks, max, &count, stack, &depth, &done) != 0) { return -1; }
+    }
+
+    return ((seen == 1) && (done == 1) && (depth == 0)) ? count : -1;
+}
+
