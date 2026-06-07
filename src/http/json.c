@@ -387,3 +387,200 @@ int json_parse(const char *js, size_t len, JsonToken *toks, int max)
     return ((seen == 1) && (done == 1) && (depth == 0)) ? count : -1;
 }
 
+static size_t utf8_encode(unsigned cp, char *out, size_t cap)
+{
+    if ((cp <= 0x7Fu) && (cap >= 1u)) { out[0] = (char)cp; return 1u; }
+    if ((cp <= 0x7FFu) && (cap >= 2u))
+    {
+        out[0] = (char)(0xC0u | (cp >> 6u));
+        out[1] = (char)(0x80u | (cp & 0x3Fu));
+        return 2u;
+    }
+    if ((cp <= 0xFFFFu) && (cap >= 3u))
+    {
+        out[0] = (char)(0xE0u | (cp >> 12u));
+        out[1] = (char)(0x80u | ((cp >> 6u) & 0x3Fu));
+        out[2] = (char)(0x80u | (cp & 0x3Fu));
+        return 3u;
+    }
+    if ((cp <= 0x10FFFFu) && (cap >= 4u))
+    {
+        out[0] = (char)(0xF0u | (cp >> 18u));
+        out[1] = (char)(0x80u | ((cp >> 12u) & 0x3Fu));
+        out[2] = (char)(0x80u | ((cp >> 6u) & 0x3Fu));
+        out[3] = (char)(0x80u | (cp & 0x3Fu));
+        return 4u;
+    }
+    return 0u;
+}
+
+void json_copy_str(const char *js, const JsonToken *t, char *out, size_t outsz)
+{
+    assert(js != NULL);
+    assert(t != NULL);
+    assert(out != NULL);
+    if (outsz == 0u) { return; }
+    if (t->start < 0 || t->end < t->start)
+    {
+        out[0] = '\0';
+        return;
+    }
+
+    size_t i = (size_t)t->start, end = (size_t)t->end, o = 0u;
+    while ((i < end) && ((o + 1u) < outsz))
+    {
+        char c = js[i++];
+        if ((t->type != JSON_STR) || (c != '\\')) { out[o++] = c; continue; }
+        if (i >= end) { break; }
+        c = js[i++];
+        if (c == 'b') { out[o++] = '\b'; }
+        else if (c == 'f') { out[o++] = '\f'; }
+        else if (c == 'n') { out[o++] = '\n'; }
+        else if (c == 'r') { out[o++] = '\r'; }
+        else if (c == 't') { out[o++] = '\t'; }
+        else if ((c == '"') || (c == '\\') || (c == '/')) { out[o++] = c; }
+        else if (c == 'u')
+        {
+            unsigned first = 0u, cp;
+            if (read_hex4(js, end, i, &first) != 0) { break; }
+            i += 4u;
+            cp = first;
+            if ((first >= 0xD800u) && (first <= 0xDBFFu) && ((end - i) >= 6u) && (js[i] == '\\') && (js[i + 1u] == 'u'))
+            {
+                unsigned second = 0u;
+                if (read_hex4(js, end, i + 2u, &second) != 0) { break; }
+                cp = 0x10000u + ((first - 0xD800u) << 10u) + (second - 0xDC00u);
+                i += 6u;
+            }
+            o += utf8_encode(cp, out + o, outsz - o - 1u);
+        }
+        else { break; }
+    }
+    out[o] = '\0';
+}
+
+int json_object_get(const char *js, const JsonToken *toks, int ntok, int obj, const char *key)
+{
+    assert(js != NULL);
+    assert(toks != NULL);
+    assert(key != NULL);
+    if ((obj < 0) || (obj >= ntok) || (toks[obj].type != JSON_OBJ)) { return -1; }
+
+    size_t klen = strlen(key);
+    if (klen >= JSON_MAX_KEY_BYTES) { return -1; }
+    int direct = 0;
+    for (int i = obj + 1; (i < ntok) && (toks[i].start < toks[obj].end); i++)
+    {
+        if (toks[i].parent != obj) { continue; }
+        if (((direct & 1) == 0) && (toks[i].type == JSON_STR))
+        {
+            int raw_len = toks[i].end - toks[i].start;
+            if ((raw_len >= 0) && (raw_len < JSON_MAX_KEY_BYTES))
+            {
+                char decoded[JSON_MAX_KEY_BYTES];
+                json_copy_str(js, &toks[i], decoded, sizeof(decoded));
+                if ((strlen(decoded) == klen) && (memcmp(decoded, key, klen) == 0)) { return ((i + 1) < ntok) ? i + 1 : -1; }
+            }
+        }
+        direct++;
+    }
+    return -1;
+}
+
+int json_path_get(const char *js, const JsonToken *toks, int ntok, int root, const char *path)
+{
+    assert(js != NULL);
+    assert(toks != NULL);
+    assert(path != NULL);
+    if (root < 0 || root >= ntok) { return -1; }
+    int cur = root;
+    const char *p = path;
+    for (int guard = 0; (*p != '\0') && (cur >= 0) && (guard < JSON_MAX_DEPTH); guard++)
+    {
+        char seg[JSON_PATH_SEGMENT];
+        size_t n = 0u;
+        while ((*p != '\0') && (*p != '.') && ((n + 1u) < sizeof(seg))) { seg[n++] = *p++; }
+        if ((*p != '\0') && (*p != '.')) { return -1; }
+        seg[n] = '\0';
+        if (*p == '.') { p++; }
+        if (cur >= ntok) { return -1; }
+        if (toks[cur].type == JSON_OBJ)
+        {
+            cur = json_object_get(js, toks, ntok, cur, seg);
+        }
+        else if (toks[cur].type == JSON_ARR)
+        {
+            char *endp = NULL;
+            errno = 0;
+            long want = strtol(seg, &endp, 10);
+            if ((errno != 0) || (endp == seg) || (*endp != '\0') || (want < 0) || (want > INT_MAX)) { return -1; }
+            int idx = 0, found = -1;
+            for (int i = cur + 1; (i < ntok) && (toks[i].start < toks[cur].end); i++)
+            {
+                if (toks[i].parent != cur) { continue; }
+                if (idx == (int)want) { found = i; break; }
+                idx++;
+            }
+            cur = found;
+        }
+        else { return -1; }
+    }
+    return (*p == '\0') ? cur : -1;
+}
+
+static int token_text(const char *js, const JsonToken *t, char *buf, size_t cap)
+{
+    if ((js == NULL) || (t == NULL) || (buf == NULL) || (cap < 2u) || (t->type != JSON_PRIM) || (t->start < 0) || (t->end <= t->start)) { return -1; }
+    size_t n = (size_t)(t->end - t->start);
+    if (n >= cap) { return -1; }
+    memcpy(buf, js + t->start, n);
+    buf[n] = '\0';
+    return 0;
+}
+
+int json_token_long_checked(const char *js, const JsonToken *t, long *out)
+{
+    char buf[128], *end = NULL;
+    if ((out == NULL) || (token_text(js, t, buf, sizeof(buf)) != 0)) { return -1; }
+    errno = 0;
+    long value = strtol(buf, &end, 10);
+    if ((errno == ERANGE) || (end == buf) || (*end != '\0')) { return -1; }
+    *out = value;
+    return 0;
+}
+
+int json_token_double_checked(const char *js, const JsonToken *t, double *out)
+{
+    char buf[128], *end = NULL;
+    if ((out == NULL) || (token_text(js, t, buf, sizeof(buf)) != 0)) { return -1; }
+    errno = 0;
+    double value = strtod(buf, &end);
+    if ((errno == ERANGE) || (end == buf) || (*end != '\0') || !isfinite(value)) { return -1; }
+    *out = value;
+    return 0;
+}
+
+int json_token_bool_checked(const char *js, const JsonToken *t, int *out)
+{
+    if ((js == NULL) || (t == NULL) || (out == NULL) || (t->type != JSON_PRIM) || (t->start < 0) || (t->end < t->start))
+    { return -1; }
+    size_t n = (size_t)(t->end - t->start);
+    if ((n == 4u) && (memcmp(js + t->start, "true", 4u) == 0))
+    {
+        *out = 1;
+        return 0;
+    }
+    if ((n == 5u) && (memcmp(js + t->start, "false", 5u) == 0))
+    {
+        *out = 0;
+        return 0;
+    }
+    return -1;
+}
+
+long json_token_long(const char *js, const JsonToken *t)
+{
+    long value = 0L;
+    (void)json_token_long_checked(js, t, &value);
+    return value;
+}
