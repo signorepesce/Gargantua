@@ -110,3 +110,106 @@ int static_files_init(void)
     return root_directory < 0 ? -1 : 0;
 }
 
+int static_files_enabled(void)
+{
+    return (root_directory >= 0) ? 1 : 0;
+}
+
+static int strip_prefix(const char *url_path, const char **rest)
+{
+    assert(url_path != NULL);
+    assert(rest != NULL);
+
+    if (strncmp(url_path, g_prefix, g_prefix_len) != 0) { return -1; }
+
+    const char *tail = url_path + g_prefix_len;
+    if ((tail[0] != '\0') && (tail[0] != '/')) { return -1; }
+
+    *rest = tail;
+
+    return 0;
+}
+
+static int open_static_path(char *path)
+{
+    int directory = dup(root_directory);
+    if (directory < 0) { return -1; }
+    char *part = path;
+    for (size_t step = 0u; step < STATIC_MAX_PATH; step++)
+    {
+        char *slash = strchr(part, '/');
+        if (slash != NULL) { *slash = '\0'; }
+        if (part[0] == '\0' || part[0] == '.' || strchr(part, '\\') != NULL)
+        {
+            (void)close(directory);
+            return -1;
+        }
+        int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK;
+        if (slash != NULL) { flags |= O_DIRECTORY; }
+        int next = openat(directory, part, flags);
+        (void)close(directory);
+        if (next < 0 || slash == NULL) { return next; }
+        directory = next;
+        part = slash + 1;
+    }
+    (void)close(directory);
+    return -1;
+}
+
+int static_file_read(const char *url_path, char *out, size_t cap, size_t *len, const char **content_type)
+{
+    assert(url_path != NULL);
+    assert(out != NULL);
+    assert(len != NULL);
+    assert(content_type != NULL);
+
+    if (static_files_enabled() == 0) { return -1; }
+
+    const char *rest = NULL;
+    if (strip_prefix(url_path, &rest) != 0) { return -1; }
+
+    size_t      rest_len = strlen(rest);
+    const char *suffix   = "";
+
+    if (rest_len == 0u)
+    {
+        rest   = "/";
+        suffix = "index.html";
+    }
+    else if (rest[rest_len - 1u] == '/')
+    {
+        suffix = "index.html";
+    }
+
+    char candidate[STATIC_MAX_PATH];
+    int  n = snprintf(candidate, sizeof(candidate), "%s%s", rest[0] == '/' ? rest + 1 : rest, suffix);
+    if ((n <= 0) || ((size_t)n >= sizeof(candidate))) { return -1; }
+
+    const char *mime = content_type_for(candidate);
+    int descriptor = open_static_path(candidate);
+    if (descriptor < 0) { return -1; }
+    FILE *file = fdopen(descriptor, "rb");
+    if (file == NULL)
+    {
+        (void)close(descriptor);
+        return -1;
+    }
+
+    struct stat info;
+    if ((fstat(fileno(file), &info) != 0) || (!S_ISREG(info.st_mode)) || (info.st_size < 0) || ((size_t)info.st_size > cap) || ((size_t)info.st_size > (size_t)STATIC_MAX_BYTES))
+    {
+        (void)fclose(file);
+        return -1;
+    }
+
+    size_t want = (size_t)info.st_size;
+    size_t got  = fread(out, 1u, want, file);
+    (void)fclose(file);
+
+    if (got != want) { return -1; }
+
+    *len          = got;
+    *content_type = mime;
+
+    return 0;
+}
