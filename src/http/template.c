@@ -124,3 +124,158 @@ static int name_safe(const char *name)
     return 1;
 }
 
+static int load_template(const char *name, char *out, size_t cap, size_t *len)
+{
+    assert(name != NULL);
+    assert(out != NULL);
+    assert(len != NULL);
+
+    if ((template_enabled() == 0) || (name_safe(name) == 0)) { return -1; }
+
+    char candidate[TEMPLATE_MAX_PATH];
+    int  n = snprintf(candidate, sizeof(candidate), "%s/%s", g_root, name);
+    if ((n <= 0) || ((size_t)n >= sizeof(candidate))) { return -1; }
+
+    char resolved[PATH_MAX];
+    if (realpath(candidate, resolved) == NULL) { return -1; }
+    if ((strncmp(resolved, g_root, g_root_len) != 0) || (resolved[g_root_len] != '/')) { return -1; }
+
+    FILE *file = fopen(resolved, "rb");
+    if (file == NULL) { return -1; }
+
+    struct stat info;
+    if ((fstat(fileno(file), &info) != 0) || (!S_ISREG(info.st_mode)) || (info.st_size < 0) || ((size_t)info.st_size >= cap))
+    {
+        (void)fclose(file);
+        return -1;
+    }
+
+    size_t want = (size_t)info.st_size;
+    size_t got  = fread(out, 1u, want, file);
+    (void)fclose(file);
+
+    if (got != want) { return -1; }
+
+    out[got] = '\0';
+    *len     = got;
+
+    return 0;
+}
+
+static void write_row(Writer *writer, const char *block, size_t block_len, const TypeInfo *type, const void *row, int index, int total)
+{
+    assert(writer != NULL);
+    assert(block != NULL);
+
+    size_t at = 0u;
+    while ((at < block_len) && (writer->overflow == 0))
+    {
+        const char *open = find_bytes(block + at, block_len - at, "{{", 2u);
+        if (open == NULL)
+        {
+            write_raw(writer, block + at, block_len - at);
+            return;
+        }
+
+        write_raw(writer, block + at, (size_t)(open - (block + at)));
+
+        const char *close = find_bytes(open, block_len - (size_t)(open - block), "}}", 2u);
+        if (close == NULL)
+        {
+            write_raw(writer, open, block_len - (size_t)(open - block));
+            return;
+        }
+
+        char key[64];
+        size_t key_len = (size_t)(close - open) - 2u;
+        if (key_len >= sizeof(key)) { key_len = sizeof(key) - 1u; }
+        memcpy(key, open + 2, key_len);
+        key[key_len] = '\0';
+
+        char value[TEMPLATE_MAX_VALUE];
+        if (strcmp(key, "index") == 0)
+        {
+            (void)snprintf(value, sizeof(value), "%d", index);
+            write_escaped(writer, value);
+        }
+        else if (strcmp(key, "count") == 0)
+        {
+            (void)snprintf(value, sizeof(value), "%d", total);
+            write_escaped(writer, value);
+        }
+        else if ((row != NULL) && (field_text(type, row, key, value, sizeof(value)) == 0))
+        {
+            write_escaped(writer, value);
+        }
+
+        at = (size_t)(close - block) + 2u;
+    }
+}
+
+static str finish(const Writer *writer)
+{
+    assert(writer != NULL);
+
+    if (writer->overflow != 0)
+    {
+        request_fail(500, "rendered page exceeds the response limit");
+        return "";
+    }
+
+    return writer->out;
+}
+
+str render_template(str name, RowList rows)
+{
+    if (name == NULL)
+    {
+        request_fail(500, "template name missing");
+        return "";
+    }
+
+    static _Thread_local char source[TEMPLATE_MAX_BYTES];
+    size_t source_len = 0u;
+
+    if (load_template(name, source, sizeof(source), &source_len) != 0)
+    {
+        request_fail(500, "template not found or too large");
+        return "";
+    }
+
+    char *out = request_alloc((size_t)TEMPLATE_MAX_OUT);
+    if (out == NULL) { return ""; }
+
+    Writer writer = { out, (size_t)TEMPLATE_MAX_OUT, 0u, 0 };
+    out[0] = '\0';
+
+    const char *each_open  = find_bytes(source, source_len, "{{#each}}", 9u);
+    const char *each_close = find_bytes(source, source_len, "{{/each}}", 9u);
+
+    if ((each_open == NULL) || (each_close == NULL) || (each_close < each_open))
+    {
+        write_row(&writer, source, source_len, rows.type, NULL, 0, rows.count);
+        return finish(&writer);
+    }
+
+    size_t head_len  = (size_t)(each_open - source);
+    const char *block = each_open + 9;
+    size_t block_len = (size_t)(each_close - block);
+    const char *tail = each_close + 9;
+    size_t tail_len  = source_len - (size_t)(tail - source);
+
+    write_row(&writer, source, head_len, rows.type, NULL, 0, rows.count);
+
+    if ((rows.type != NULL) && (rows.items != NULL))
+    {
+        for (int i = 0; (i < rows.count) && (i < PAGE_MAX); i++)
+        {
+            const char *row = (const char *)rows.items +
+                              ((size_t)i * rows.type->size);
+            write_row(&writer, block, block_len, rows.type, row, i, rows.count);
+        }
+    }
+
+    write_row(&writer, tail, tail_len, rows.type, NULL, 0, rows.count);
+
+    return finish(&writer);
+}
