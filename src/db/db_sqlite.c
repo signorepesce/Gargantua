@@ -381,3 +381,190 @@ static int type_valid(const TypeInfo *type)
     return 1;
 }
 
+static int read_text_column(sqlite3_stmt *st, int c, int sql_type, void *slot)
+{
+    assert(st != NULL);
+    assert(slot != NULL);
+
+    if (sql_type != SQLITE_TEXT) { return -1; }
+
+    const unsigned char *text = sqlite3_column_text(st, c);
+    if (text == NULL) { return -1; }
+
+    str value = arena_intern((const char *)text);
+    if (value == NULL) { return -1; }
+
+    memcpy(slot, &value, sizeof(value));
+
+    return 0;
+}
+
+static int read_integer_column(sqlite3_stmt *st, int c, int sql_type, FieldKind kind, void *slot)
+{
+    assert(st != NULL);
+    assert(slot != NULL);
+
+    if (sql_type != SQLITE_INTEGER) { return -1; }
+
+    sqlite3_int64 raw = sqlite3_column_int64(st, c);
+
+    if (kind == FIELD_INT)
+    {
+        if ((raw < (sqlite3_int64)INT_MIN) || (raw > (sqlite3_int64)INT_MAX)) { return -1; }
+        int value = (int)raw;
+        memcpy(slot, &value, sizeof(value));
+        return 0;
+    }
+
+    if (kind == FIELD_BOOL)
+    {
+        if ((raw != 0) && (raw != 1)) { return -1; }
+        bool value = (raw != 0);
+        memcpy(slot, &value, sizeof(value));
+        return 0;
+    }
+
+    if ((sizeof(long) < sizeof(sqlite3_int64)) && ((raw < (sqlite3_int64)LONG_MIN) || (raw > (sqlite3_int64)LONG_MAX))) { return -1; }
+
+    long value = (long)raw;
+    memcpy(slot, &value, sizeof(value));
+
+    return 0;
+}
+
+static int read_double_column(sqlite3_stmt *st, int c, int sql_type, void *slot)
+{
+    assert(st != NULL);
+    assert(slot != NULL);
+
+    if ((sql_type != SQLITE_FLOAT) && (sql_type != SQLITE_INTEGER)) { return -1; }
+
+    double value = sqlite3_column_double(st, c);
+    if (isfinite(value) == 0) { return -1; }
+
+    memcpy(slot, &value, sizeof(value));
+
+    return 0;
+}
+
+static int read_column(sqlite3_stmt *st, int c, const FieldInfo *field, void *slot)
+{
+    assert(st != NULL);
+    assert(field != NULL);
+    assert(slot != NULL);
+
+    int sql_type = sqlite3_column_type(st, c);
+
+    switch (field->kind)
+    {
+        case FIELD_STR:
+            return read_text_column(st, c, sql_type, slot);
+
+        case FIELD_INT:
+        case FIELD_BOOL:
+        case FIELD_LONG:
+            return read_integer_column(st, c, sql_type, field->kind, slot);
+
+        case FIELD_DOUBLE:
+            return read_double_column(st, c, sql_type, slot);
+
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+static int field_slot_valid(const TypeInfo *type, const FieldInfo *field)
+{
+    assert(type != NULL);
+    assert(field != NULL);
+
+    size_t need = column_size_for_kind(field->kind);
+
+    return !((need == 0u) || ((size_t)field->size != need) || ((size_t)field->offset > (size_t)type->size) || (need > ((size_t)type->size - (size_t)field->offset)));
+}
+
+static int read_field(sqlite3_stmt *st, int cols, const FieldInfo *field, void *obj)
+{
+    assert(st != NULL);
+    assert(field != NULL);
+
+    int found = 0;
+
+    for (int c = 0; (c < cols) && (c < 64); c++)
+    {
+        const char *name = sqlite3_column_name(st, c);
+        if ((name == NULL) || (strcmp(name, field->name) != 0)) { continue; }
+        if (found != 0) { return -1; }
+        found = 1;
+
+        if (sqlite3_column_type(st, c) == SQLITE_NULL)
+        {
+            if ((field->flags & (unsigned)FIELD_NOT_NULL) != 0u) { return -1; }
+            continue;
+        }
+
+        char *base = obj;
+        if (read_column(st, c, field, base + field->offset) != 0) { return -1; }
+    }
+
+    return (found == 0) ? -1 : 0;
+}
+
+static int row_to_struct(sqlite3_stmt *st, const TypeInfo *type, void *obj)
+{
+    assert(st != NULL);
+    assert(type != NULL);
+
+    if ((type->size == 0u) || (type->field_count == 0u) || (type->field_count > 64u) || (type->fields == NULL)) { return -1; }
+
+    memset(obj, 0, type->size);
+    int cols = sqlite3_column_count(st);
+
+    for (unsigned f = 0u; (f < type->field_count) && (f < 64u); f++)
+    {
+        const FieldInfo *field = &type->fields[f];
+
+        if (field_slot_valid(type, field) == 0) { return -1; }
+        if (read_field(st, cols, field, obj) != 0) { return -1; }
+    }
+
+    return 0;
+}
+
+int db_query_one(const TypeInfo *type, void *out, str sql, const SqlArg *args, int nargs)
+{
+    if (!type_valid(type) || (out == NULL) || (sql == NULL) || (nargs < 0) || (nargs > DB_MAX_ARGS) || ((nargs > 0) && (args == NULL))) { return -1; }
+    memset(out, 0, type->size);
+
+    if (db_lock() != 0) { return -1; }
+    sqlite3_stmt *st = prepare_statement(sql, args, nargs);
+    if (st == NULL)
+    {
+        db_unlock();
+        return -1;
+    }
+
+    int rc    = sqlite3_step(st);
+    int found = 0;
+
+    if (rc == SQLITE_ROW)
+    {
+        found = (row_to_struct(st, type, out) == 0) ? 1 : -1;
+    }
+    else if (rc != SQLITE_DONE)
+    {
+        db_failure();
+        if (t_depth && !t_failed_level) { t_failed_level = t_depth; }
+        (void)sqlite3_finalize(st);
+        db_unlock();
+        return -1;
+    }
+
+    (void)sqlite3_finalize(st);
+    db_unlock();
+    if (found < 0 && t_depth && !t_failed_level) { t_failed_level = t_depth; }
+    return found;
+}
+
