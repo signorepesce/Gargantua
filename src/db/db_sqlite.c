@@ -181,3 +181,203 @@ void db_close(void)
     db_unlock();
 }
 
+static int bind_arguments(sqlite3_stmt *st, const SqlArg *args, int nargs)
+{
+    assert(st != NULL);
+    assert(nargs >= 0);
+
+    for (int i = 0; (i < nargs) && (i < DB_MAX_ARGS); i++)
+    {
+        int rc;
+        if (args[i].kind == FIELD_STR)
+        {
+            rc = (args[i].s != NULL)
+                     ? sqlite3_bind_text(st, i + 1, args[i].s, -1, SQLITE_TRANSIENT)
+                     : sqlite3_bind_null(st, i + 1);
+        }
+        else if ((args[i].kind == FIELD_INT) || (args[i].kind == FIELD_BOOL))
+        {
+            rc = sqlite3_bind_int(st, i + 1, args[i].i);
+        }
+        else if (args[i].kind == FIELD_LONG)
+        {
+            rc = sqlite3_bind_int64(st, i + 1, (sqlite3_int64)args[i].l);
+        }
+        else if ((args[i].kind == FIELD_DOUBLE) && (isfinite(args[i].d) != 0))
+        {
+            rc = sqlite3_bind_double(st, i + 1, args[i].d);
+        }
+        else { return -1; }
+        if (rc != SQLITE_OK) { return -1; }
+    }
+    return 0;
+}
+
+static sqlite3_stmt *prepare_statement(str sql, const SqlArg *args, int nargs)
+{
+    assert(sql != NULL);
+    assert(DB_MAX_SQL > 0);
+
+    if (g_db == NULL)
+    {
+        (void)fprintf(stderr, "gargantua: the database is not open\n");
+        if (t_depth && !t_failed_level) { t_failed_level = t_depth; } return NULL;
+    }
+
+    size_t len = 0u;
+    while (len < DB_MAX_SQL && sql[len]) { len++; }
+    if (len >= DB_MAX_SQL) { if (t_depth && !t_failed_level) { t_failed_level = t_depth; } return NULL; }
+    if (t_depth > 0 && sqlite3_get_autocommit(g_db) != 0) { if (t_depth && !t_failed_level) { t_failed_level = t_depth; } return NULL; }
+    statement_deadline();
+    sqlite3_stmt *st = NULL;
+    const char *tail = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &st, &tail) != SQLITE_OK)
+    {
+        db_failure();
+        (void)fprintf(stderr, "gargantua: sqlite prepare_statement failed (%d)\n", sqlite3_extended_errcode(g_db));
+        if (t_depth && !t_failed_level) { t_failed_level = t_depth; } return NULL;
+    }
+    while (tail != NULL && (*tail == ' ' || *tail == '\t' || *tail == '\r' || *tail == '\n')) { tail++; }
+    if (st == NULL || (tail != NULL && *tail != '\0'))
+    {
+        (void)sqlite3_finalize(st);
+        if (t_depth && !t_failed_level) { t_failed_level = t_depth; } return NULL;
+    }
+    if (sqlite3_bind_parameter_count(st) != nargs)
+    {
+        (void)fprintf(stderr, "gargantua: sqlite: placeholders and args differ\n");
+        (void)sqlite3_finalize(st);
+        if (t_depth && !t_failed_level) { t_failed_level = t_depth; } return NULL;
+    }
+    if (bind_arguments(st, args, nargs) != 0)
+    {
+        (void)sqlite3_finalize(st);
+        if (t_depth && !t_failed_level) { t_failed_level = t_depth; } return NULL;
+    }
+    return st;
+}
+
+int db_execute(str sql, const SqlArg *args, int nargs)
+{
+    if (sql == NULL || nargs < 0) { return -1; }
+
+    if (nargs > DB_MAX_ARGS || (nargs > 0 && args == NULL)) { return -1; }
+    if (db_lock() != 0) { return -1; }
+    g_last_id = -1;
+    sqlite3_stmt *st = prepare_statement(sql, args, nargs);
+    if (st == NULL)
+    {
+        db_unlock();
+        return -1;
+    }
+
+    int rc = sqlite3_step(st);
+    if ((rc != SQLITE_DONE) && (rc != SQLITE_ROW))
+    {
+        if (t_depth && !t_failed_level) { t_failed_level = t_depth; }
+        db_failure();
+        (void)fprintf(stderr, "gargantua: sqlite operation failed (%d)\n", sqlite3_extended_errcode(g_db));
+        (void)sqlite3_finalize(st);
+        db_unlock();
+        return -1;
+    }
+
+    int changed = sqlite3_changes(g_db);
+    const char *actual = sqlite3_sql(st);
+    while ((actual != NULL) && ((*actual == ' ') || (*actual == '\t') || (*actual == '\r') || (*actual == '\n'))) { actual++; }
+    sqlite3_int64 rowid = sqlite3_last_insert_rowid(g_db);
+    if ((changed > 0) && (actual != NULL) && (strncasecmp(actual, "INSERT", 6u) == 0) && ((actual[6] == ' ') || (actual[6] == '\t') || (actual[6] == '\r') || (actual[6] == '\n')) && (rowid >= (sqlite3_int64)INT_MIN) && (rowid <= (sqlite3_int64)INT_MAX)) { g_last_id = (int)rowid; }
+    (void)sqlite3_finalize(st);
+    db_unlock();
+    return changed;
+}
+
+int db_last_id(void)
+{
+    assert(DB_MAX_ARGS > 0);
+
+    return g_last_id;
+}
+
+int db_insert_id(str sql, const SqlArg *args, int nargs)
+{
+    g_last_id = -1;
+    if ((sql == NULL) || (nargs < 0) || (nargs > DB_MAX_ARGS) || ((nargs > 0) && (args == NULL)) || (sqlite3_libversion_number() < 3035000)) { return -1; }
+
+    size_t len = 0u;
+    while ((len < DB_MAX_SQL) && (sql[len] != '\0')) { len++; }
+    if (len >= DB_MAX_SQL) { return -1; }
+    const char *start = sql;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') { start++; }
+    if ((strncasecmp(start, "INSERT", 6u) != 0) || (start[6] != ' ' && start[6] != '\t' && start[6] != '\r' && start[6] != '\n')) { return -1; }
+
+    if (db_lock() != 0) { return -1; }
+    sqlite3_stmt *st = prepare_statement(sql, args, nargs);
+    if (st == NULL)
+    {
+        db_unlock();
+        return -1;
+    }
+
+    int id = -1;
+    if ((sqlite3_stmt_readonly(st) == 0) && (sqlite3_column_count(st) == 1) && (sqlite3_step(st) == SQLITE_ROW) && (sqlite3_column_type(st, 0) == SQLITE_INTEGER))
+    {
+        sqlite3_int64 value = sqlite3_column_int64(st, 0);
+        if ((value > 0) && (value <= (sqlite3_int64)INT_MAX) && (sqlite3_step(st) == SQLITE_DONE) && (sqlite3_changes(g_db) == 1)) { id = (int)value; }
+    }
+    if (id < 0) { db_failure(); }
+    if (sqlite3_finalize(st) != SQLITE_OK) { id = -1; db_failure(); }
+    if (id < 0 && t_depth && !t_failed_level) { t_failed_level = t_depth; }
+    g_last_id = id;
+    db_unlock();
+    return id;
+}
+
+static size_t column_size_for_kind(FieldKind kind)
+{
+    if (kind == FIELD_INT) { return sizeof(int); }
+    if (kind == FIELD_LONG) { return sizeof(long); }
+    if (kind == FIELD_DOUBLE) { return sizeof(double); }
+    if (kind == FIELD_BOOL) { return sizeof(bool); }
+    if (kind == FIELD_STR) { return sizeof(str); }
+    return 0u;
+}
+
+static int is_safe_identifier(const char *name)
+{
+    if ((name == NULL) || ((name[0] < 'A' || name[0] > 'Z') && (name[0] < 'a' || name[0] > 'z') && name[0] != '_')) { return 0; }
+    for (size_t i = 1u; i < (1024u * 1024u); i++)
+    {
+        char c = name[i];
+        if (c == '\0') { return 1; }
+        if ((c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_') { return 0; }
+    }
+    return 0;
+}
+
+static int type_valid(const TypeInfo *type)
+{
+    if ((type == NULL) || !is_safe_identifier(type->name) || (type->size == 0u) || (type->field_count == 0u) || (type->field_count > 64u) || (type->fields == NULL)) { return 0; }
+    unsigned keys = 0u;
+    for (unsigned i = 0u; i < type->field_count; i++)
+    {
+        const FieldInfo *f = &type->fields[i];
+        size_t need = column_size_for_kind(f->kind);
+        if (!is_safe_identifier(f->name) || (need == 0u) || (f->size != need) || (f->offset > type->size) || (need > (size_t)(type->size - f->offset)) || (f->nested != NULL) || ((f->flags & ~(unsigned)(FIELD_PRIMARY_KEY | FIELD_NOT_NULL | FIELD_UNIQUE)) != 0u)) { return 0; }
+        if ((f->flags & FIELD_PRIMARY_KEY) != 0u)
+        {
+            if ((f->kind != FIELD_INT) || (++keys > 1u)) { return 0; }
+        }
+        if ((f->references != NULL) || (f->reference_key != NULL))
+        {
+            if ((f->kind != FIELD_INT) || !is_safe_identifier(f->references) || !is_safe_identifier(f->reference_key)) { return 0; }
+        }
+        for (unsigned j = 0u; j < i; j++)
+        {
+            const FieldInfo *other = &type->fields[j];
+            if ((strcmp(f->name, other->name) == 0) || ((f->offset < (size_t)other->offset + other->size) && (other->offset < (size_t)f->offset + f->size))) { return 0; }
+        }
+    }
+    return 1;
+}
+
