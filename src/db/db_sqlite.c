@@ -568,3 +568,192 @@ int db_query_one(const TypeInfo *type, void *out, str sql, const SqlArg *args, i
     return found;
 }
 
+int db_query_many(const TypeInfo *type, void *rows, int max, str sql, const SqlArg *args, int nargs)
+{
+    if (!type_valid(type) || (rows == NULL) || (sql == NULL) || (nargs < 0) || (nargs > DB_MAX_ARGS) || ((nargs > 0) && (args == NULL)) || (max <= 0) || (max > SQLITE_MAX_ROWS)) { return -1; }
+
+    if (db_lock() != 0) { return -1; }
+    sqlite3_stmt *st = prepare_statement(sql, args, nargs);
+    if (st == NULL)
+    {
+        db_unlock();
+        return -1;
+    }
+
+    char *base  = rows;
+    int   count = 0;
+
+    int rc = SQLITE_ROW;
+    while ((count < max) && ((rc = sqlite3_step(st)) == SQLITE_ROW))
+    {
+        if (row_to_struct(st, type, base + ((size_t)count * type->size)) != 0)
+        {
+            if (t_depth && !t_failed_level) { t_failed_level = t_depth; }
+            (void)sqlite3_finalize(st);
+            db_unlock();
+            return -1;
+        }
+        count++;
+    }
+
+    if (rc != SQLITE_DONE && count != max) { db_failure(); }
+    (void)sqlite3_finalize(st);
+    db_unlock();
+    if (rc != SQLITE_DONE && count != max && t_depth && !t_failed_level) { t_failed_level = t_depth; }
+    return (rc == SQLITE_DONE || count == max) ? count : -1;
+}
+
+static int run_control_statement(const char *sql)
+{
+    t_control = 1;
+    statement_deadline();
+    int rc = sqlite3_exec(g_db, sql, NULL, NULL, NULL);
+    t_control = 0;
+    if (rc != SQLITE_OK) { db_failure(); }
+    return rc == SQLITE_OK ? 0 : -1;
+}
+
+int db_begin(void)
+{
+    if (t_depth >= 16 || db_lock() != 0) { return -1; }
+    if (g_db == NULL || (t_depth > 0 && sqlite3_get_autocommit(g_db)))
+    {
+        db_unlock();
+        return -1;
+    }
+    char sql[64];
+    if (t_depth == 0) { (void)snprintf(sql, sizeof(sql), "BEGIN IMMEDIATE"); }
+    else { (void)snprintf(sql, sizeof(sql), "SAVEPOINT wrap_sp_%d", t_depth + 1); }
+    if (run_control_statement(sql) != 0) { db_unlock(); return -1; }
+    t_depth++;
+    return 0;
+}
+
+int db_commit(void)
+{
+    if (t_depth == 0 || t_failed_level || g_db == NULL || sqlite3_get_autocommit(g_db)) { return -1; }
+    char sql[64];
+    if (t_depth == 1) { (void)snprintf(sql, sizeof(sql), "COMMIT"); }
+    else { (void)snprintf(sql, sizeof(sql), "RELEASE wrap_sp_%d", t_depth); }
+    if (run_control_statement(sql) != 0) { return -1; }
+    t_depth--;
+    db_unlock();
+    return 0;
+}
+
+int db_rollback(void)
+{
+    if (t_depth == 0 || g_db == NULL) { return -1; }
+    int rc = 0;
+    if (!sqlite3_get_autocommit(g_db))
+    {
+        char sql[128];
+        if (t_depth == 1) { (void)snprintf(sql, sizeof(sql), "ROLLBACK"); }
+        else
+        {
+            (void)snprintf(sql, sizeof(sql), "ROLLBACK TO wrap_sp_%d; RELEASE wrap_sp_%d", t_depth, t_depth);
+        }
+        rc = run_control_statement(sql);
+    }
+    if (rc == 0)
+    {
+        if (t_failed_level >= t_depth) { t_failed_level = 0; }
+        if (sqlite3_get_autocommit(g_db)) { t_depth = 0; }
+        else { t_depth--; }
+        db_unlock();
+    }
+    return rc;
+}
+
+void db_abort_all(void)
+{
+    if (t_depth == 0) { return; }
+    sqlite3_progress_handler(g_db, 0, NULL, NULL);
+    int rc = run_control_statement("ROLLBACK");
+    if (rc != 0 && !sqlite3_get_autocommit(g_db))
+    {
+        (void)sqlite3_close_v2(g_db);
+        g_db = NULL;
+    }
+    if (g_db != NULL) { sqlite3_progress_handler(g_db, 1000, sqlite_progress_handler, NULL); }
+    t_depth = 0;
+    t_failed_level = 0;
+    db_unlock();
+}
+
+int db_depth(void)
+{
+    return t_depth;
+}
+
+int db_ready(void)
+{
+    if (db_lock() != 0) { return 0; }
+    int ready = g_db != NULL;
+    db_unlock();
+    return ready;
+}
+
+int db_script(const char *sql)
+{
+    if (sql == NULL || t_depth == 0 || g_db == NULL) { return -1; }
+    statement_deadline();
+    const char *cursor = sql;
+    for (int i = 0; i < 256; i++)
+    {
+        if (*cursor == '\0') { return 0; }
+        sqlite3_stmt *st = NULL;
+        const char *tail = NULL;
+        if (sqlite3_prepare_v2(g_db, cursor, -1, &st, &tail) != SQLITE_OK)
+        {
+            (void)sqlite3_finalize(st);
+            return -1;
+        }
+        if (tail == NULL || tail <= cursor)
+        {
+            (void)sqlite3_finalize(st);
+            return -1;
+        }
+        cursor = tail;
+        if (st == NULL) { continue; }
+        int rc = sqlite3_step(st);
+        int done = rc == SQLITE_DONE;
+        if (sqlite3_finalize(st) != SQLITE_OK || !done) { return -1; }
+    }
+    return *cursor == '\0' ? 0 : -1;
+}
+
+int db_migration_count(void)
+{
+    if (t_depth == 0) { return -1; }
+    if (db_execute("CREATE TABLE IF NOT EXISTS _gargantua_migrations " "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL)", SQL_NOARGS) < 0) { return -1; }
+    sqlite3_stmt *st = prepare_statement("SELECT count(*) FROM _gargantua_migrations", NULL, 0);
+    if (st == NULL) { return -1; }
+    int n = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+    if (sqlite3_finalize(st) != SQLITE_OK) { return -1; }
+    return n;
+}
+
+int db_migration(int version, const char *name, const char *sql, int apply)
+{
+    if (t_depth == 0 || version <= 0 || name == NULL || sql == NULL) { return -1; }
+    sqlite3_stmt *st = prepare_statement("SELECT name, sql FROM _gargantua_migrations WHERE version = ?", SQL_ARGS(SQL_INT(version)));
+    if (st == NULL) { return -1; }
+    int step = sqlite3_step(st);
+    int exists = step == SQLITE_ROW;
+    int valid = step == SQLITE_DONE;
+    if (exists)
+    {
+        const char *saved_name = (const char *)sqlite3_column_text(st, 0);
+        const char *saved_sql = (const char *)sqlite3_column_text(st, 1);
+        valid = saved_name != NULL && saved_sql != NULL &&
+            (size_t)sqlite3_column_bytes(st, 0) == strlen(name) &&
+            (size_t)sqlite3_column_bytes(st, 1) == strlen(sql) &&
+            strcmp(saved_name, name) == 0 && strcmp(saved_sql, sql) == 0;
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK || !valid) { return -1; }
+    if (exists) { return 1; }
+    if (!apply) { return 0; }
+    if (db_script(sql) != 0) { return -1; }
+    return db_execute("INSERT INTO _gargantua_migrations(version,name,sql) VALUES (?,?,?)", SQL_ARGS(SQL_INT(version), SQL_TEXT(name), SQL_TEXT(sql))) == 1 ? 1 : -1;
+}
