@@ -217,3 +217,213 @@ static void sink_add_int(Sink *s, long value)
     if (s->overflow == 0) { s->buf[s->len] = '\0'; }
 }
 
+const char *read_str(const void *obj, unsigned short offset)
+{
+    assert(obj != NULL);
+
+    const char *value = NULL;
+    memcpy(&value, (const char *)obj + offset, sizeof(value));
+    return value;
+}
+
+int read_int(const void *obj, unsigned short offset)
+{
+    assert(obj != NULL);
+
+    int value = 0;
+    memcpy(&value, (const char *)obj + offset, sizeof(value));
+    return value;
+}
+
+bool read_bool(const void *obj, unsigned short offset)
+{
+    bool value = false;
+    memcpy(&value, (const char *)obj + offset, sizeof(value));
+    return value;
+}
+
+long read_long(const void *obj, unsigned short offset)
+{
+    long value = 0L;
+    memcpy(&value, (const char *)obj + offset, sizeof(value));
+    return value;
+}
+
+double read_double(const void *obj, unsigned short offset)
+{
+    double value = 0.0;
+    memcpy(&value, (const char *)obj + offset, sizeof(value));
+    return value;
+}
+
+const char *field_kind_name(FieldKind kind)
+{
+    assert(kind >= FIELD_INT);
+    assert(kind < FIELD_KIND_COUNT);
+
+    switch (kind)
+    {
+    case FIELD_INT:    return "int";
+    case FIELD_LONG:   return "long";
+    case FIELD_DOUBLE: return "double";
+    case FIELD_BOOL:   return "bool";
+    case FIELD_STR:    return "str";
+    case FIELD_OBJECT: return "object";
+    default:        return "?";
+    }
+}
+
+static int json_write_scalar(const FieldInfo *f, const void *obj, Sink *sink)
+{
+    assert(f != NULL);
+    assert(sink != NULL);
+
+    if (f->kind == FIELD_STR)
+    {
+        const char *value = read_str(obj, f->offset);
+        if (value == NULL)
+        {
+            sink_add(sink, "null");
+            return 0;
+        }
+        sink_add(sink, "\"");
+        sink_add_escaped(sink, value);
+        sink_add(sink, "\"");
+        return 0;
+    }
+
+    if (f->kind == FIELD_INT)
+    {
+        sink_add_int(sink, (long)read_int(obj, f->offset));
+        return 0;
+    }
+    if (f->kind == FIELD_LONG)
+    {
+        sink_add_int(sink, read_long(obj, f->offset));
+        return 0;
+    }
+    if (f->kind == FIELD_DOUBLE)
+    {
+        double value = read_double(obj, f->offset);
+        if (isfinite(value) == 0) { return -1; }
+        char scratch[64];
+        (void)snprintf(scratch, sizeof(scratch), "%.17g", value);
+        sink_add(sink, scratch);
+        return 0;
+    }
+    if (f->kind == FIELD_BOOL)
+    {
+        sink_add(sink, (read_bool(obj, f->offset) != false) ? "true" : "false");
+        return 0;
+    }
+
+    sink_add(sink, "null");
+
+    return 0;
+}
+
+static int json_write_nested(const TypeInfo *type, const void *obj, Sink *sink, unsigned depth)
+{
+    if (depth >= NEST_DEPTH_MAX) { return -1; }
+
+    sink_add(sink, "{");
+
+    for (unsigned i = 0u; (i < type->field_count) && (sink->overflow == 0); i++)
+    {
+        const FieldInfo *f = &type->fields[i];
+
+        if (i > 0u) { sink_add(sink, ","); }
+        sink_add(sink, "\"");
+        sink_add(sink, f->name);
+        sink_add(sink, "\":");
+
+        int rc = (f->kind == FIELD_OBJECT)
+            ? json_write_nested(f->nested, (const char *)obj + f->offset, sink, depth + 1u)
+            : json_write_scalar(f, obj, sink);
+
+        if (rc != 0) { return -1; }
+    }
+
+    sink_add(sink, "}");
+
+    return (sink->overflow == 0) ? 0 : -1;
+}
+
+int json_write_struct(const TypeInfo *type, const void *obj, char *out, size_t cap)
+{
+    if ((out == NULL) || (cap == 0u)) { return -1; }
+    out[0] = '\0';
+    if ((obj == NULL) || (type_valid(type) == 0)) { return -1; }
+    Sink sink;
+    sink_init(&sink, out, cap);
+    if (json_write_nested(type, obj, &sink, 0u) != 0)
+    {
+        out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+RowList row_list_make(const TypeInfo *type, const void *items, size_t count)
+{
+    RowList list = {0};
+    if ((type_valid(type) == 0) || (count > (size_t)PAGE_MAX) || (count > (size_t)INT_MAX) || (count > (SIZE_MAX / (size_t)type->size)) || ((count > 0u) && (items == NULL)))
+    {
+        request_fail(500, "invalid collection");
+        return list;
+    }
+    if (count > 0u)
+    {
+        size_t bytes = count * (size_t)type->size;
+        list.items = request_alloc(bytes);
+        if (list.items == NULL) { return list; }
+        memcpy(list.items, items, bytes);
+    }
+    list.type = type;
+    list.count = (int)count;
+    list.size = (count > 0u) ? (int)count : 20;
+    return list;
+}
+
+int row_list_write(RowList list, int paginated, char *out, size_t cap)
+{
+    if ((out == NULL) || (cap == 0u)) { return -1; }
+    out[0] = '\0';
+    if ((type_valid(list.type) == 0) || (list.count < 0) || (list.count > PAGE_MAX) || ((list.count > 0) && (list.items == NULL)) || ((size_t)list.count > (SIZE_MAX / (size_t)list.type->size)) || ((paginated != 0) && ((list.page < 0) || (list.size <= 0) || (list.size > PAGE_MAX) || (list.count > list.size)))) { return -1; }
+
+    Sink sink;
+    sink_init(&sink, out, cap);
+    if (paginated != 0)
+    {
+        SINK_ADD_LITERAL(&sink, "{\"items\":");
+    }
+    SINK_ADD_LITERAL(&sink, "[");
+    for (int i = 0; (i < list.count) && (sink.overflow == 0); i++)
+    {
+        if (i > 0) { SINK_ADD_LITERAL(&sink, ","); }
+        const void *item = (const char *)list.items +
+                           (size_t)i * (size_t)list.type->size;
+        if (json_write_nested(list.type, item, &sink, 0u) != 0)
+        {
+            out[0] = '\0';
+            return -1;
+        }
+    }
+    SINK_ADD_LITERAL(&sink, "]");
+    if (paginated != 0)
+    {
+        SINK_ADD_LITERAL(&sink, ",\"page\":");
+        sink_add_int(&sink, (long)list.page);
+        SINK_ADD_LITERAL(&sink, ",\"size\":");
+        sink_add_int(&sink, (long)list.size);
+        SINK_ADD_LITERAL(&sink, ",\"hasMore\":");
+        sink_add(&sink, (list.has_more != 0) ? "true" : "false");
+        SINK_ADD_LITERAL(&sink, "}");
+    }
+    if (sink.overflow != 0)
+    {
+        out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
