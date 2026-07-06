@@ -155,3 +155,140 @@ int query_has(const RequestParams *p, str name)
     return (query_index(p, name) >= 0) ? 1 : 0;
 }
 
+static _Thread_local const HttpRequest *g_request;
+static _Thread_local Arena *g_arena;
+
+void *request_alloc(size_t size)
+{
+    void *memory = NULL;
+    if ((g_arena != NULL) && (g_arena->base != NULL) && (size > 0u)) { memory = arena_alloc(g_arena, size); }
+    if (memory == NULL) { request_fail(500, "request allocation failed"); }
+    return memory;
+}
+
+void request_bind(const void *request)
+{
+    assert(PARAM_VALUE_LEN > 0);
+    assert(sizeof(void *) > 0u);
+
+    g_request = request;
+}
+
+str request_header(str name)
+{
+    assert(name != NULL);
+    assert(PARAM_VALUE_LEN > 0);
+
+    if (g_request == NULL) { return ""; }
+
+    size_t      len   = 0u;
+    const char *value = http_find_header(g_request, name, &len);
+
+    if ((value == NULL) || (len == 0u) || (g_arena == NULL) || (len >= HTTP_MAX_HEADER_BYTES)) { return ""; }
+
+    char *copy = arena_alloc(g_arena, len + 1u);
+    if (copy == NULL) { return ""; }
+    memcpy(copy, value, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+void arena_bind(void *arena)
+{
+    assert(RUNTIME_MAX_TEXT > 0u);
+    assert(sizeof(void *) > 0u);
+
+    g_arena = arena;
+}
+
+str arena_intern(str text)
+{
+    assert(RUNTIME_MAX_TEXT > 0u);
+
+    if ((text == NULL) || (g_arena == NULL)) { return NULL; }
+
+    size_t n = 0u;
+    while ((n <= RUNTIME_MAX_TEXT) && (text[n] != '\0')) { n++; }
+    if (n > RUNTIME_MAX_TEXT) { return NULL; }
+
+    char *copy = arena_alloc(g_arena, n + 1u);
+    if (copy == NULL) { return NULL; }
+
+    memcpy(copy, text, n);
+    copy[n] = '\0';
+    return copy;
+}
+
+str str_format(str format, ...)
+{
+    assert(format != NULL);
+    assert(FORMAT_MAX > 0);
+
+    char    text[FORMAT_MAX];
+    va_list ap;
+
+    va_start(ap, format);
+    int n = vsnprintf(text, sizeof(text), format, ap);
+    va_end(ap);
+
+    if ((n < 0) || ((size_t)n >= sizeof(text))) { return ""; }
+
+    return arena_intern(text);
+}
+
+int field_text(const TypeInfo *type, const void *row, const char *name, char *out, size_t cap)
+{
+    if ((type == NULL) || (row == NULL) || (name == NULL) || (out == NULL) || (cap == 0u)) { return -1; }
+
+    out[0] = '\0';
+
+    for (unsigned i = 0u; i < type->field_count; i++)
+    {
+        const FieldInfo *field = &type->fields[i];
+        if (strcmp(field->name, name) != 0) { continue; }
+
+        int written = 0;
+        switch (field->kind)
+        {
+            case FIELD_STR:
+            {
+                const char *value = read_str(row, field->offset);
+                written = snprintf(out, cap, "%s", (value != NULL) ? value : "");
+                break;
+            }
+            case FIELD_INT:
+                written = snprintf(out, cap, "%d", read_int(row, field->offset));
+                break;
+            case FIELD_LONG:
+                written = snprintf(out, cap, "%ld", read_long(row, field->offset));
+                break;
+            case FIELD_DOUBLE:
+                written = snprintf(out, cap, "%.17g", read_double(row, field->offset));
+                break;
+            case FIELD_BOOL:
+                written = snprintf(out, cap, "%s", read_bool(row, field->offset) ? "true" : "false");
+                break;
+            default:
+                return -1;
+        }
+
+        return ((written < 0) || ((size_t)written >= cap)) ? -1 : 0;
+    }
+
+    return -1;
+}
+
+str time_now(void)
+{
+    time_t     seconds = time(NULL);
+    struct tm  parts;
+    char       stamp[32];
+
+    if (gmtime_r(&seconds, &parts) == NULL) { return ""; }
+    if (strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &parts) == 0u) { return ""; }
+
+    str copy = arena_intern(stamp);
+
+    return (copy != NULL) ? copy : "";
+}
+
