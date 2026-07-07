@@ -292,3 +292,182 @@ str time_now(void)
     return (copy != NULL) ? copy : "";
 }
 
+void log_write(const char *level, const char *format, ...)
+{
+    assert(level != NULL);
+    assert(format != NULL);
+
+    char message[512];
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    if (written < 0) { return; }
+
+    char safe[sizeof(message) * 6u];
+    size_t at = 0u;
+    for (size_t i = 0u; (message[i] != '\0') && ((at + 8u) < sizeof(safe)); i++)
+    {
+        unsigned char c = (unsigned char)message[i];
+        if (c == (unsigned char)'"')
+        {
+            safe[at++] = '\\'; safe[at++] = '"';
+        }
+        else if (c == (unsigned char)'\\')
+        {
+            safe[at++] = '\\'; safe[at++] = '\\';
+        }
+        else if (c < 0x20u)
+        {
+            at += (size_t)snprintf(safe + at, sizeof(safe) - at, "\\u%04x", c);
+        }
+        else
+        {
+            safe[at++] = (char)c;
+        }
+    }
+    safe[at] = '\0';
+
+    flockfile(stdout);
+    (void)printf("{\"level\":\"%s\",\"message\":\"%s\"}\n", level, safe);
+    funlockfile(stdout);
+    (void)fflush(stdout);
+}
+
+int text_equals(str a, str b)
+{
+    if ((a == NULL) || (b == NULL)) { return (a == b) ? 1 : 0; }
+
+    return (strcmp(a, b) == 0) ? 1 : 0;
+}
+
+int text_empty(str a)
+{
+    return ((a == NULL) || (a[0] == '\0')) ? 1 : 0;
+}
+
+str str_concat(str a, str b)
+{
+    assert(FORMAT_MAX > 0);
+    assert(RUNTIME_MAX_TEXT > 0u);
+
+    if (a == NULL) { a = ""; }
+    if (b == NULL) { b = ""; }
+
+    size_t na = strlen(a);
+    size_t nb = strlen(b);
+
+    if ((na > RUNTIME_MAX_TEXT) || (nb > (RUNTIME_MAX_TEXT - na))) { return ""; }
+
+    char *out = arena_alloc(g_arena, na + nb + 1u);
+    if (out == NULL) { return ""; }
+
+    memcpy(out, a, na);
+    memcpy(out + na, b, nb);
+    out[na + nb] = '\0';
+    return out;
+}
+
+static _Thread_local sigjmp_buf *g_escape;
+
+int request_active(void)
+{
+    return g_escape != NULL;
+}
+
+void request_raise(int status, str message)
+{
+    request_fail(status, message);
+    if (g_escape != NULL) { siglongjmp(*g_escape, 1); }
+}
+
+int dispatch_task(void (*handler)(void))
+{
+    if ((handler == NULL) || (g_escape != NULL)) { return -1; }
+    sigjmp_buf escape;
+    g_escape = &escape;
+    if (sigsetjmp(escape, 0) == 0) { handler(); }
+    g_escape = NULL;
+    if (db_depth() > 0)
+    {
+        db_abort_all();
+        request_fail(500, "unfinished task transaction rolled back");
+    }
+    return request_failed() ? -1 : 0;
+}
+
+int dispatch_route(DispatchFn handler, const RequestParams *params, char *body, size_t len, char *out, size_t cap)
+{
+    if (handler == NULL || g_escape != NULL || out == NULL || cap == 0u) { return -1; }
+    sigjmp_buf escape;
+    g_escape = &escape;
+    int rc = 0;
+    if (sigsetjmp(escape, 0) == 0) { rc = handler(params, body, len, out, cap); }
+    g_escape = NULL;
+    if (db_depth() > 0)
+    {
+        db_abort_all();
+        if (!request_failed()) { request_fail(500, "unfinished transaction rolled back"); }
+    }
+    return rc;
+}
+
+Transaction transaction_begin(void)
+{
+    Transaction tx = {0};
+    if (request_failed()) { return tx; }
+    if (db_begin() != 0)
+    {
+        request_raise(503, "could not begin transaction");
+        return tx;
+    }
+    tx.active = 1;
+    tx.level = db_depth();
+    return tx;
+}
+
+int transaction_live(Transaction *t)
+{
+    return t != NULL && t->active;
+}
+
+void transaction_end(Transaction *t)
+{
+    if (t == NULL || !t->active) { return; }
+    t->active = 0;
+    if (t->level != db_depth())
+    {
+        db_abort_all();
+        request_raise(500, "transaction scope mismatch");
+        return;
+    }
+    if (request_failed())
+    {
+        if (db_rollback() != 0) { db_abort_all(); }
+        return;
+    }
+    if (db_commit() != 0)
+    {
+        db_abort_all();
+        request_raise(500, "could not commit transaction");
+    }
+}
+
+void transaction_cleanup(Transaction *t)
+{
+    if (t == NULL || !t->active) { return; }
+    t->active = 0;
+    db_abort_all();
+    if (!request_failed()) { request_raise(500, "transaction exited before commit"); }
+}
+
+void transaction_abort_if_open(void)
+{
+    db_abort_all();
+}
+
+int transaction_depth(void)
+{
+    return db_depth();
+}
