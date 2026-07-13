@@ -167,3 +167,192 @@ static int parse_status_line(const char *wire, size_t len, size_t *at)
     return status;
 }
 
+static int header_int(const char *line, size_t len, long *out)
+{
+    assert(line != NULL);
+    assert(out != NULL);
+
+    size_t i = 0u;
+    while ((i < len) && ((line[i] == ' ') || (line[i] == '\t'))) { i++; }
+    if (i >= len) { return -1; }
+
+    long value = 0L;
+    size_t digits = 0u;
+    while ((i < len) && (line[i] >= '0') && (line[i] <= '9'))
+    {
+        if (value > ((long)FETCH_MAX_BODY + 1L)) { return -1; }
+        value = (value * 10L) + (long)(line[i] - '0');
+        digits++;
+        i++;
+    }
+
+    if ((digits == 0u) || (digits > 9u)) { return -1; }
+
+    *out = value;
+
+    return 0;
+}
+
+static int take_header(const char *line, size_t line_len, long *declared, int *chunked)
+{
+    assert(line != NULL);
+    assert(declared != NULL);
+    assert(chunked != NULL);
+
+    const char *colon = memchr(line, ':', line_len);
+    if (colon == NULL) { return 0; }
+
+    size_t name_len  = (size_t)(colon - line);
+    size_t value_len = line_len - name_len - 1u;
+
+    if ((name_len == 14u) && (strncasecmp(line, "Content-Length", 14u) == 0))
+    {
+        if ((*declared >= 0L) || (header_int(colon + 1, value_len, declared) != 0)) { return -1; }
+        return 0;
+    }
+
+    if ((name_len == 17u) && (strncasecmp(line, "Transfer-Encoding", 17u) == 0))
+    {
+        if ((value_len < 7u) || (strncasecmp(colon + 1 + (value_len - 7u), "chunked", 7u) != 0)) { return -1; }
+        *chunked = 1;
+    }
+
+    return 0;
+}
+
+static int take_body(char *body, size_t available, long declared, int chunked, size_t *body_len)
+{
+    assert(body != NULL);
+    assert(body_len != NULL);
+
+    if (chunked != 0)
+    {
+        if (declared >= 0L) { return FETCH_BAD_REPLY; }
+        return decode_chunked(body, available, body_len);
+    }
+
+    size_t length = (declared >= 0L) ? (size_t)declared : available;
+    if (length > available) { return FETCH_BAD_REPLY; }
+    if (length > (size_t)FETCH_MAX_BODY) { return FETCH_TOO_LARGE; }
+
+    *body_len = length;
+
+    return 0;
+}
+
+int parse_reply(char *wire, size_t len, int *status_out, char **body_out, size_t *body_len)
+{
+    assert(status_out != NULL);
+    assert(body_out != NULL);
+    assert(body_len != NULL);
+
+    size_t at     = 0u;
+    int    status = parse_status_line(wire, len, &at);
+    if (status < 0) { return FETCH_BAD_REPLY; }
+
+    long declared = -1L;
+    int  chunked  = 0;
+
+    for (int guard = 0; guard < 128; guard++)
+    {
+        const char *eol = memchr(wire + at, '\n', len - at);
+        if (eol == NULL) { return FETCH_BAD_REPLY; }
+
+        size_t line_len = (size_t)(eol - (wire + at));
+        if ((line_len > 0u) && (wire[at + line_len - 1u] == '\r')) { line_len--; }
+
+        if (line_len == 0u)
+        {
+            at = (size_t)(eol - wire) + 1u;
+
+            int rc = take_body(wire + at, len - at, declared, chunked, body_len);
+            if (rc != 0) { return rc; }
+
+            *status_out = status;
+            *body_out   = wire + at;
+
+            return 0;
+        }
+
+        if (take_header(wire + at, line_len, &declared, &chunked) != 0) { return FETCH_BAD_REPLY; }
+
+        at = (size_t)(eol - wire) + 1u;
+    }
+
+    return FETCH_BAD_REPLY;
+}
+
+int channel_open(Channel *channel, const Target *target, const struct timespec *deadline)
+{
+    assert(channel != NULL);
+    assert(target != NULL);
+
+    memset(channel, 0, sizeof(*channel));
+    channel->fd = -1;
+
+    int fd = connect_target(target, deadline);
+    if (fd < 0) { return fd; }
+    channel->fd = fd;
+
+#ifdef GARGANTUA_TLS
+    if (target->secure != 0)
+    {
+        int rc = tls_open(channel, target, deadline);
+        if (rc != 0)
+        {
+            channel_close(channel);
+            return rc;
+        }
+    }
+#else
+    (void)deadline;
+#endif
+
+    return 0;
+}
+
+int make_deadline(int timeout_ms, struct timespec *deadline)
+{
+    assert(deadline != NULL);
+
+    int budget = ((timeout_ms > 0) && (timeout_ms <= 60000)) ? timeout_ms
+                                                             : FETCH_TIMEOUT_MS;
+
+    if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0) { return -1; }
+
+    deadline->tv_sec  += (time_t)(budget / 1000);
+    deadline->tv_nsec += (long)((budget % 1000) * 1000000L);
+    if (deadline->tv_nsec >= 1000000000L)
+    {
+        deadline->tv_sec  += 1;
+        deadline->tv_nsec -= 1000000000L;
+    }
+
+    return 0;
+}
+
+int build_request(char *out, size_t cap, const char *method, const Target *target, const char *content_type, size_t body_len)
+{
+    assert(out != NULL);
+    assert(method != NULL);
+    assert(target != NULL);
+
+    int n = snprintf(out, cap, "%s %s HTTP/1.1\r\n" "Host: %s\r\n" "User-Agent: gargantua\r\n" "Accept: */*\r\n" "Connection: close\r\n" "%s%s%s" "Content-Length: %zu\r\n" "\r\n", method, target->path, target->host, (content_type != NULL) ? "Content-Type: " : "", (content_type != NULL) ? content_type : "", (content_type != NULL) ? "\r\n" : "", body_len);
+
+    return ((n <= 0) || ((size_t)n >= cap)) ? -1 : n;
+}
+
+int resolve_request(str url, Target *target)
+{
+    assert(target != NULL);
+
+    if (url == NULL) { return FETCH_BAD_URL; }
+    if (parse_url(url, target) != 0) { return FETCH_BAD_URL; }
+    if (host_allowed(target->host) == 0) { return FETCH_BLOCKED; }
+
+#ifndef GARGANTUA_TLS
+    if (target->secure != 0) { return FETCH_NO_TLS; }
+#endif
+
+    return 0;
+}
