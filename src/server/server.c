@@ -215,3 +215,208 @@ static const char *status_reason(int status)
     }
 }
 
+int deadline_after(struct timespec *deadline, int seconds)
+{
+    if ((deadline == NULL) || (seconds <= 0) || (clock_gettime(CLOCK_MONOTONIC, deadline) != 0)) { return -1; }
+    deadline->tv_sec += (time_t)seconds;
+    return 0;
+}
+
+int set_timeout_until(int sock, int option, const struct timespec *deadline)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) { return -1; }
+
+    time_t sec = deadline->tv_sec - now.tv_sec;
+    long nsec = deadline->tv_nsec - now.tv_nsec;
+    if (nsec < 0L)
+    {
+        sec--;
+        nsec += 1000000000L;
+    }
+    if ((sec < 0) || ((sec == 0) && (nsec <= 0L))) { return -1; }
+
+    struct timeval tv;
+    tv.tv_sec = sec;
+    tv.tv_usec = (suseconds_t)((nsec + 999L) / 1000L);
+    if (tv.tv_usec >= 1000000)
+    {
+        tv.tv_sec++;
+        tv.tv_usec -= 1000000;
+    }
+    return (setsockopt(sock, SOL_SOCKET, option, &tv, sizeof(tv)) == 0)
+               ? 0 : -1;
+}
+
+static void iovec_advance(struct iovec *iov, int *count, size_t consumed)
+{
+    assert(iov != NULL);
+    assert(count != NULL);
+
+    size_t left = consumed;
+    int    i    = 0;
+
+    while ((i < *count) && (left > 0u))
+    {
+        if (left >= iov[i].iov_len)
+        {
+            left -= iov[i].iov_len;
+            iov[i].iov_len = 0u;
+            i++;
+        }
+        else
+        {
+            iov[i].iov_base = (char *)iov[i].iov_base + left;
+            iov[i].iov_len -= left;
+            left = 0u;
+        }
+    }
+
+    while ((*count > 0) && (iov[0].iov_len == 0u))
+    {
+        if (*count == 2) { iov[0] = iov[1]; }
+        (*count)--;
+    }
+}
+
+static int send_header_body(int sock, const char *header, size_t hlen, const char *body, size_t blen)
+{
+    assert(header != NULL);
+    assert(hlen > 0u);
+
+    struct timespec deadline;
+    if (deadline_after(&deadline, SERVER_TIMEOUT_S) != 0) { return -1; }
+    struct iovec iov[2] = {{0}};
+    int          count = 1;
+
+    iov[0].iov_base = (void *)(size_t)header;
+    iov[0].iov_len  = hlen;
+
+    if ((body != NULL) && (blen > 0u))
+    {
+        iov[1].iov_base = (void *)(size_t)body;
+        iov[1].iov_len  = blen;
+        count = 2;
+    }
+
+    size_t total = hlen + ((count == 2) ? blen : 0u);
+    size_t sent  = 0u;
+    int    guard = 0;
+
+    while ((sent < total) && (guard < SERVER_SEND_MAX))
+    {
+        if (set_timeout_until(sock, SO_SNDTIMEO, &deadline) != 0) { return -1; }
+        ssize_t w = writev(sock, iov, count);
+        if ((w < 0) && (errno == EINTR)) { continue; }
+        if (w <= 0) { return -1; }
+
+        sent += (size_t)w;
+        guard++;
+
+        iovec_advance(iov, &count, (size_t)w);
+    }
+
+    return (sent == total) ? 0 : -1;
+}
+
+int send_all(int sock, const char *buf, size_t len)
+{
+    assert(buf != NULL);
+    assert(len > 0u);
+
+    struct timespec deadline;
+    if (deadline_after(&deadline, SERVER_TIMEOUT_S) != 0) { return -1; }
+
+    size_t sent  = 0u;
+    int    guard = 0;
+
+    while ((sent < len) && (guard < SERVER_SEND_MAX))
+    {
+        if (set_timeout_until(sock, SO_SNDTIMEO, &deadline) != 0) { return -1; }
+        ssize_t w = send(sock, buf + sent, len - sent, 0);
+        if ((w < 0) && (errno == EINTR)) { continue; }
+        if (w <= 0) { return -1; }
+        sent += (size_t)w;
+        guard++;
+    }
+
+    return (sent == len) ? 0 : -1;
+}
+
+static int header_append(char *header, size_t cap, size_t *at, const char *format, ...)
+    __attribute__((format(printf, 4, 5)));
+
+static int header_append(char *header, size_t cap, size_t *at, const char *format, ...)
+{
+    assert(header != NULL);
+    assert(at != NULL);
+    assert(format != NULL);
+
+    if (*at >= cap) { return -1; }
+
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(header + *at, cap - *at, format, args);
+    va_end(args);
+
+    if ((n < 0) || ((size_t)n >= (cap - *at))) { return -1; }
+
+    *at += (size_t)n;
+
+    return 0;
+}
+
+static int write_cors_headers(char *header, size_t cap, size_t *at, int status)
+{
+    assert(header != NULL);
+    assert(at != NULL);
+
+    if (response_cors)
+    {
+        const char *vary = response_preflight
+            ? ", Access-Control-Request-Method, Access-Control-Request-Headers" : "";
+        if (header_append(header, cap, at, "Vary: Origin%s\r\n", vary) != 0) { return -1; }
+    }
+
+    if (response_origin[0] == '\0') { return 0; }
+
+    const char *credentials =
+        (strcmp(config_str("cors.credentials", "false"), "true") == 0)
+            ? "Access-Control-Allow-Credentials: true\r\n" : "";
+
+    if (header_append(header, cap, at, "Access-Control-Allow-Origin: %s\r\n" "Access-Control-Expose-Headers: Location\r\n%s", response_origin, credentials) != 0) { return -1; }
+
+    if ((response_preflight == 0) || (status != 204)) { return 0; }
+
+    return header_append(header, cap, at, "Access-Control-Allow-Methods: %s\r\n%s%s%s", response_allow, response_requested_headers[0] ? "Access-Control-Allow-Headers: " : "", response_requested_headers, response_requested_headers[0] ? "\r\n" : "");
+}
+
+int send_bytes(int sock, int status, const char *content_type, const char *body, size_t blen, int keep_alive)
+{
+    assert(content_type != NULL);
+    assert(body != NULL);
+
+    char  *header = response_wire;
+    size_t cap    = sizeof(response_wire);
+    size_t at     = 0u;
+
+    if (header_append(header, cap, &at, "HTTP/1.1 %d %s\r\n" "Content-Type: %s\r\n" "X-Content-Type-Options: nosniff\r\n" "Referrer-Policy: no-referrer\r\n" "Connection: %s\r\n", status, status_reason(status), content_type, (keep_alive == 1) ? "keep-alive" : "close") != 0) { return -1; }
+
+    if ((status != 204) && (status != 304) && (header_append(header, cap, &at, "Content-Length: %zu\r\n", blen) != 0)) { return -1; }
+
+    int n = response_write(header + at, cap - at);
+    if (n < 0) { return -1; }
+    at += (size_t)n;
+
+    if ((response_allow[0] != '\0') && (header_append(header, cap, &at, "Allow: %s\r\n", response_allow) != 0)) { return -1; }
+
+    if (write_cors_headers(header, cap, &at, status) != 0) { return -1; }
+
+    if (at + 2u >= cap) { return -1; }
+    memcpy(header + at, "\r\n", 2u);
+    at += 2u;
+
+    if (send_header_body(sock, header, at, body, response_head ? 0u : blen) != 0) { return -1; }
+
+    return (keep_alive == 1) ? 0 : -1;
+}
