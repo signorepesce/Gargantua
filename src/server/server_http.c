@@ -147,3 +147,197 @@ int read_request(int sock, char *buf, size_t cap, size_t *len, HttpRequest *req)
     return -1;
 }
 
+int split_path(char *path, char **query)
+{
+    assert(path != NULL);
+    assert(query != NULL);
+
+    char *mark = strchr(path, '?');
+    if (mark != NULL)
+    {
+        *mark  = '\0';
+        *query = mark + 1;
+    }
+    else
+    {
+        *query = NULL;
+    }
+
+    if (strchr(path, '\\') != NULL) { return -1; }
+    for (size_t i = 0u; path[i] != '\0'; i++)
+    {
+        if ((path[i] == '%') && (path[i + 1u] != '\0') && (path[i + 2u] != '\0'))
+        {
+            char a = path[i + 1u];
+            char b = path[i + 2u];
+            int encoded_slash = ((a == '2') && ((b == 'f') || (b == 'F')));
+            int encoded_backslash = ((a == '5') && ((b == 'c') || (b == 'C')));
+            if ((encoded_slash != 0) || (encoded_backslash != 0)) { return -1; }
+        }
+    }
+    if (url_decode(path) != 0) { return -1; }
+    if ((strchr(path, '\\') != NULL) || (path[0] != '/')) { return -1; }
+
+    const char *segment = path + 1;
+    while (*segment != '\0')
+    {
+        const char *slash = strchr(segment, '/');
+        size_t n = (slash != NULL) ? (size_t)(slash - segment)
+                                   : strlen(segment);
+        if ((n == 0u) || (n == 1u && segment[0] == '.') || (n == 2u && segment[0] == '.' && segment[1] == '.')) { return -1; }
+        if (slash == NULL) { break; }
+        segment = slash + 1;
+        if (*segment == '\0') { return -1; }
+    }
+    return 0;
+}
+
+static int header_has_token(const char *value, size_t len, const char *wanted)
+{
+    size_t wanted_len = strlen(wanted);
+    size_t at = 0u;
+
+    while (at < len)
+    {
+        while (at < len && (value[at] == ' ' || value[at] == '\t' || value[at] == ',')) { at++; }
+        size_t start = at;
+        while (at < len && value[at] != ',') { at++; }
+        size_t end = at;
+        while (end > start && (value[end - 1u] == ' ' || value[end - 1u] == '\t')) { end--; }
+        if ((end - start == wanted_len) && (strncasecmp(value + start, wanted, wanted_len) == 0)) { return 1; }
+    }
+    return 0;
+}
+
+int request_header_has_token(const HttpRequest *req, const char *name, const char *wanted)
+{
+    size_t name_len = strlen(name);
+    for (int i = 0; (i < req->num_headers) && (i < HTTP_MAX_HEADERS); i++)
+    {
+        const HttpHeader *header = &req->headers[i];
+        if ((header->name_len == name_len) && (strncasecmp(header->name, name, name_len) == 0) && (header_has_token(header->value, header->value_len, wanted) != 0)) { return 1; }
+    }
+    return 0;
+}
+
+static int header_single_value(const HttpRequest *req, const char *name, char *out, size_t cap)
+{
+    int found = 0;
+    size_t name_len = strlen(name);
+    out[0] = '\0';
+    for (int i = 0; i < req->num_headers && i < HTTP_MAX_HEADERS; i++)
+    {
+        const HttpHeader *h = &req->headers[i];
+        if ((h->name_len != name_len) || (strncasecmp(h->name, name, name_len) != 0)) { continue; }
+        if (found || h->value_len >= cap) { return -1; }
+        memcpy(out, h->value, h->value_len);
+        out[h->value_len] = '\0';
+        if (!response_value(out)) { return -1; }
+        found = 1;
+    }
+    return found;
+}
+
+static int list_contains(const char *list, const char *value, int exact)
+{
+    size_t len = strlen(value);
+    const char *at = list;
+    while (*at != '\0')
+    {
+        while (*at == ' ' || *at == '\t') { at++; }
+        const char *end = strchr(at, ',');
+        const char *next = (end != NULL) ? end + 1 : at + strlen(at);
+        if (end == NULL) { end = next; }
+        while (end > at && (end[-1] == ' ' || end[-1] == '\t')) { end--; }
+        if (len > 0u && (size_t)(end - at) == len && (exact ? memcmp(at, value, len) == 0 : strncasecmp(at, value, len) == 0)) { return 1; }
+        at = next;
+    }
+    return 0;
+}
+
+void cors_prepare(const HttpRequest *req)
+{
+    const char *origins = config_str("cors.origins", "");
+    response_cors = (*origins != '\0');
+    char origin[RESPONSE_VALUE_CAP];
+    if (response_cors && header_single_value(req, "Origin", origin, sizeof(origin)) == 1 && strcmp(origin, "*") != 0 && list_contains(origins, origin, 1)) { memcpy(response_origin, origin, strlen(origin) + 1u); }
+}
+
+static int cors_preflight(const HttpRequest *req, const char *allow)
+{
+    char method[HTTP_MAX_METHOD];
+    char requested[RESPONSE_VALUE_CAP];
+    int m = header_single_value(req, "Access-Control-Request-Method", method, sizeof(method));
+    int h = header_single_value(req, "Access-Control-Request-Headers", requested, sizeof(requested));
+    if (!response_cors || strcmp(req->method, "OPTIONS") != 0 || (m == 0 && h == 0)) { return 0; }
+    response_preflight = 1;
+    if (m != 1 || h < 0 || !response_token(method)) { return 400; }
+    if (response_origin[0] == '\0' || !list_contains(allow, method, 1)) { return 403; }
+    if (h == 1)
+    {
+        char *at = requested;
+        for (;;)
+        {
+            char *comma = strchr(at, ',');
+            if (comma != NULL) { *comma = '\0'; }
+            while (*at == ' ' || *at == '\t') { at++; }
+            size_t len = strlen(at);
+            while (len > 0u && (at[len - 1u] == ' ' || at[len - 1u] == '\t')) { at[--len] = '\0'; }
+            if (!response_token(at)) { return 400; }
+            if (!list_contains(config_str("cors.headers", ""), at, 0)) { return 403; }
+            if (comma == NULL) { break; }
+            at = comma + 1;
+        }
+        if (header_single_value(req, "Access-Control-Request-Headers", response_requested_headers, sizeof(response_requested_headers)) != 1) { return 400; }
+    }
+    return 204;
+}
+
+int is_health_path(const char *path)
+{
+    assert(path != NULL);
+
+    return (strcmp(path, "/health/live") == 0) ||
+           (strcmp(path, "/health/ready") == 0);
+}
+
+int serve_health(int sock, const HttpRequest *req, const char *path, int keep_alive, int *status_out)
+{
+    assert(req != NULL);
+    assert(path != NULL);
+    assert(status_out != NULL);
+
+    if ((strcmp(req->method, "GET") != 0) && (strcmp(req->method, "HEAD") != 0))
+    {
+        (void)snprintf(response_allow, sizeof(response_allow), "GET, HEAD, OPTIONS");
+        *status_out = (strcmp(req->method, "OPTIONS") == 0) ? 204 : 405;
+        return send_response(sock, *status_out, JSON_CONTENT_TYPE, "", keep_alive);
+    }
+
+    int live = (strcmp(path, "/health/live") == 0);
+    int up   = live ? 1 : ((g_stop == 0) && (db_ready() != 0));
+
+    *status_out = up ? 200 : 503;
+
+    return send_response(sock, *status_out, JSON_CONTENT_TYPE, up ? "{\"status\":\"up\"}" : "{\"status\":\"down\"}", keep_alive);
+}
+
+int serve_preflight(int sock, const HttpRequest *req, int keep_alive, int *status_out, int *handled)
+{
+    assert(req != NULL);
+    assert(status_out != NULL);
+    assert(handled != NULL);
+
+    *handled = 0;
+    if (strcmp(req->method, "OPTIONS") != 0) { return 0; }
+
+    int preflight = cors_preflight(req, response_allow);
+    if (preflight == 0) { return 0; }
+
+    if (preflight != 204) { response_origin[0] = '\0'; }
+
+    *handled    = 1;
+    *status_out = preflight;
+
+    return send_response(sock, preflight, JSON_CONTENT_TYPE, (preflight == 204) ? "" : "preflight rejected", keep_alive);
+}
