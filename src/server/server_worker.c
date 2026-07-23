@@ -214,3 +214,216 @@ static void stop_workers(void)
     (void)pthread_mutex_destroy(&g_queue.lock);
 }
 
+static int bind_listen(int port)
+{
+    assert(port > 0);
+    assert(port < 65536);
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+    {
+        perror("socket");
+        return -1;
+    }
+
+    int opt = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons((unsigned short)port);
+
+    const char *address = config_str("server.address", "127.0.0.1");
+    if (inet_pton(AF_INET, address, &addr.sin_addr) != 1)
+    {
+        (void)fprintf(stderr, "gargantua: invalid server.address: %s\n", address);
+        (void)close(fd);
+        return -1;
+    }
+
+    if (bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        perror("bind");
+        (void)close(fd);
+        return -1;
+    }
+    if (listen(fd, SERVER_BACKLOG) < 0)
+    {
+        perror("listen");
+        (void)close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static void print_routes(int port)
+{
+    assert(port > 0);
+    assert(port < 65536);
+
+    (void)printf("listening on http://%s:%d" "  (%d workers, %d routes)\n", config_str("server.address", "127.0.0.1"), port, g_worker_count, route_count());
+
+    const Route *table = route_table();
+    int            n     = route_count();
+
+    for (int i = 0; (i < n) && (i < SERVER_QUEUE); i++) { (void)printf("  %-6s %-22s -> %d\n", table[i].method, table[i].url, table[i].status); }
+    (void)printf("\n");
+    (void)fflush(stdout);
+}
+
+static int install_signal_handlers(void)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = on_signal;
+
+    if ((sigaction(SIGINT, &action, NULL) != 0) || (sigaction(SIGTERM, &action, NULL) != 0)) { return -1; }
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) { return -1; }
+
+    return 0;
+}
+
+static int load_client_limits(void)
+{
+    g_connections_per_ip  = config_int("server.connections_per_ip", 16);
+    g_requests_per_minute = config_int("server.requests_per_minute", 600);
+
+    if ((g_connections_per_ip < 1) || (g_connections_per_ip > 256) || (g_requests_per_minute < 1) || (g_requests_per_minute > 1000000)) { return -1; }
+
+    return 0;
+}
+
+static int set_nonblocking(int fd, int on)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) { return -1; }
+
+    int wanted = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+
+    return (fcntl(fd, F_SETFL, wanted) != 0) ? -1 : 0;
+}
+
+static int accept_one(int fd)
+{
+    struct sockaddr_in peer;
+    socklen_t          peer_len = sizeof(peer);
+
+    int client = accept(fd, (struct sockaddr *)&peer, &peer_len);
+    if (client < 0)
+    {
+        return ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
+                   ? 0 : -1;
+    }
+
+    if (set_nonblocking(client, 0) != 0)
+    {
+        (void)close(client);
+        return 0;
+    }
+
+    uint32_t ip = peer.sin_addr.s_addr;
+    if (client_limit(ip, 1) != 0)
+    {
+        reject_busy(client);
+        return 0;
+    }
+    if (queue_push(client, ip) != 0)
+    {
+        (void)client_limit(ip, -1);
+        reject_busy(client);
+    }
+
+    return 0;
+}
+
+static int drain_expired(const struct timespec *started)
+{
+    assert(started != NULL);
+
+    if (g_drain_ms <= 0) { return 1; }
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) { return 1; }
+
+    long elapsed = ((now.tv_sec - started->tv_sec) * 1000L) +
+                   ((now.tv_nsec - started->tv_nsec) / 1000000L);
+
+    return (elapsed >= (long)g_drain_ms) ? 1 : 0;
+}
+
+static void accept_loop(int fd)
+{
+    struct timespec drain_started = {0, 0};
+    int             draining      = 0;
+
+    for (;;)
+    {
+        if (g_stop != 0)
+        {
+            if (draining == 0)
+            {
+                draining = 1;
+                if (clock_gettime(CLOCK_MONOTONIC, &drain_started) != 0) { break; }
+                if (g_drain_ms > 0)
+                {
+                    (void)printf("shutting down: drain %d ms\n", g_drain_ms);
+                    (void)fflush(stdout);
+                }
+            }
+            if (drain_expired(&drain_started) != 0) { break; }
+        }
+
+        struct pollfd listener = { .fd = fd, .events = POLLIN, .revents = 0 };
+
+        int available = poll(&listener, 1u, 100);
+        if (available < 0)
+        {
+            if (errno == EINTR) { continue; }
+            break;
+        }
+        if ((available == 0) || ((listener.revents & POLLIN) == 0)) { continue; }
+        if (accept_one(fd) != 0) { break; }
+    }
+
+    g_drain_over = 1;
+}
+
+int server_run(int port)
+{
+    assert(port > 0);
+    assert(port < 65536);
+
+    g_stop       = 0;
+    g_drain_over = 0;
+    memset(g_clients, 0, sizeof(g_clients));
+
+    g_drain_ms = config_int("server.drain_ms", 0);
+    if ((g_drain_ms < 0) || (g_drain_ms > 120000)) { return -1; }
+
+    if ((load_client_limits() != 0) || (install_signal_handlers() != 0) || (static_files_init() != 0)) { return -1; }
+    if (start_workers() != 0) { return -1; }
+
+    int fd = bind_listen(port);
+    if (fd < 0)
+    {
+        stop_workers();
+        return -1;
+    }
+    if (set_nonblocking(fd, 1) != 0)
+    {
+        (void)close(fd);
+        stop_workers();
+        return -1;
+    }
+
+    print_routes(port);
+    accept_loop(fd);
+
+    (void)close(fd);
+    stop_workers();
+    (void)printf("shutdown complete.\n");
+
+    return 0;
+}
