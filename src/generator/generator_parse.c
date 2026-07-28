@@ -140,3 +140,128 @@ int parse_table_name(Generator *ctx, int line_no, const char *line, char *out, s
     return 0;
 }
 
+void generator_init(Generator *ctx)
+{
+    assert(ctx != NULL);
+    assert(sizeof(*ctx) > 0u);
+
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+int generator_begin_file(Generator *ctx, const char *path)
+{
+    assert(ctx != NULL);
+    assert(path != NULL);
+
+    if (ctx->file_count >= GENERATOR_MAX_FILES)
+    {
+        (void)fprintf(stderr, "gargantua: too many files (limit %d)\n", GENERATOR_MAX_FILES);
+        return -1;
+    }
+    if ((strlen(path) >= (size_t)GENERATOR_MAX_PATH) || (strpbrk(path, "\"\r\n") != NULL))
+    {
+        (void)fprintf(stderr, "gargantua: unsafe or too long path\n");
+        return -1;
+    }
+
+    (void)snprintf(ctx->path, sizeof(ctx->path), "%s", path);
+    (void)snprintf(ctx->files[ctx->file_count].path, GENERATOR_MAX_PATH, "%s", path);
+    ctx->files[ctx->file_count].has_table = 0;
+    ctx->files[ctx->file_count].has_route = 0;
+    ctx->files[ctx->file_count].has_service = 0;
+    ctx->file_count++;
+    return 0;
+}
+
+void generator_error(Generator *ctx, int line, const char *fmt, ...)
+{
+    assert(ctx != NULL);
+    assert(fmt != NULL);
+
+    va_list ap;
+    (void)fprintf(stderr, "%s:%d: ", ctx->path, line);
+    va_start(ap, fmt);
+    (void)vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    (void)fputc('\n', stderr);
+
+    ctx->errors++;
+}
+
+int parse_field(Generator *ctx, char *line, int lineno, ParsedField *out)
+{
+    assert(ctx != NULL);
+    assert(line != NULL);
+    assert(out != NULL);
+
+    char *tok[GENERATOR_MAX_TOKENS];
+    int   n = line_split_words(line, tok, GENERATOR_MAX_TOKENS);
+    if (n == 0) { return 0; }
+
+    memset(out, 0, sizeof(*out));
+
+    int i = 0;
+    while ((i < n) && (i < GENERATOR_MAX_TOKENS))
+    {
+        unsigned flag = field_flag_from_word(tok[i]);
+        if (flag == 0u) { break; }
+        out->flags |= flag;
+        i++;
+    }
+
+    if ((n - i) != 2)
+    {
+        generator_error(ctx, lineno, "could not parse the field. Expected 'type name;'");
+        return -1;
+    }
+
+    if (strlen(tok[i]) >= GENERATOR_MAX_NAME || strlen(tok[i + 1]) >= GENERATOR_MAX_NAME)
+    {
+        generator_error(ctx, lineno, "field type or name is too long");
+        return -1;
+    }
+    const char *kind = field_kind_from_c_type(tok[i]);
+    if (kind == NULL)
+    {
+        if (is_safe_identifier(tok[i]) == 0)
+        {
+            generator_error(ctx, lineno, "invalid field type '%s'", tok[i]);
+            return -1;
+        }
+        kind = "FIELD_OBJECT";
+    }
+    if (is_safe_identifier(tok[i + 1]) == 0)
+    {
+        generator_error(ctx, lineno, "field '%s' must be a plain, safe C identifier", tok[i + 1]);
+        return -1;
+    }
+
+    (void)snprintf(out->c_type, sizeof(out->c_type), "%s", tok[i]);
+    (void)snprintf(out->kind, sizeof(out->kind), "%s", kind);
+    (void)snprintf(out->name, sizeof(out->name), "%s", tok[i + 1]);
+    return 1;
+}
+
+int line_only_annotations(const char *line, unsigned *flags)
+{
+    assert(line != NULL);
+    assert(flags != NULL);
+
+    char copy[GENERATOR_MAX_LINE];
+    (void)snprintf(copy, sizeof(copy), "%s", line);
+
+    char *tok[GENERATOR_MAX_TOKENS];
+    int   n = line_split_words(copy, tok, GENERATOR_MAX_TOKENS);
+    if (n == 0) { return 0; }
+
+    unsigned acc = 0u;
+    for (int i = 0; (i < n) && (i < GENERATOR_MAX_TOKENS); i++)
+    {
+        unsigned flag = field_flag_from_word(tok[i]);
+        if (flag == 0u) { return 0; }
+        acc |= flag;
+    }
+
+    *flags |= acc;
+    return 1;
+}
