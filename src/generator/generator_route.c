@@ -158,3 +158,182 @@ static int take_param(Generator *ctx, ParseState *st, ParsedRoute *r, int slot, 
     return 0;
 }
 
+int extract_params(Generator *ctx, ParseState *st, const char *line, ParsedRoute *r, int service)
+{
+    assert(ctx != NULL);
+    assert(r != NULL);
+
+    char inner[GENERATOR_MAX_LINE];
+    if (signature_inner(line, inner, sizeof(inner)) != 0) { return -1; }
+
+    char *body = line_trim(inner);
+    if ((body[0] == '\0') || (word_equals(body, "void") == 1))
+    {
+        r->param_count = 0;
+        return 0;
+    }
+
+    char *save     = body;
+    int   finished = 0;
+
+    for (int i = 0; i < GENERATOR_MAX_PARAMS; i++)
+    {
+        char *comma = strchr(save, ',');
+        if (comma != NULL) { *comma = '\0'; }
+
+        if (take_param(ctx, st, r, i, save, service) != 0) { return -1; }
+
+        if (comma == NULL)
+        {
+            finished = 1;
+            break;
+        }
+        save = comma + 1;
+    }
+
+    if (finished == 0)
+    {
+        generator_error(ctx, st->lineno, "too many parameters (limit %d)", GENERATOR_MAX_PARAMS);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int url_has_param(const char *url, const char *name)
+{
+    assert(url != NULL);
+    assert(name != NULL);
+
+    char needle[GENERATOR_MAX_NAME + 2];
+    (void)snprintf(needle, sizeof(needle), "{%s}", name);
+
+    return (strstr(url, needle) != NULL) ? 1 : 0;
+}
+
+static int url_param_slot(const char *url, const char *name)
+{
+    int slot = 0;
+    for (size_t i = 0u; i < GENERATOR_MAX_URL && url[i] != '\0'; i++)
+    {
+        if (url[i] != '{') { continue; }
+        size_t start = ++i;
+        while (i < GENERATOR_MAX_URL && url[i] != '\0' && url[i] != '}') { i++; }
+        if (i >= GENERATOR_MAX_URL || url[i] != '}') { return -1; }
+        size_t len = i - start;
+        if (strlen(name) == len && memcmp(url + start, name, len) == 0) { return slot; }
+        slot++;
+    }
+    return -1;
+}
+
+int count_url_params(const char *url)
+{
+    assert(url != NULL);
+
+    int n = 0;
+    for (int i = 0; (i < GENERATOR_MAX_URL) && (url[i] != '\0'); i++)
+    {
+        if (url[i] == '{') { n++; }
+    }
+    return n;
+}
+
+int parse_route_url(Generator *ctx, ParseState *st, const char *line, const char *word, char out[GENERATOR_MAX_URL])
+{
+    const char *open = strchr(line, '(');
+    if (open == NULL) { return -1; }
+
+    const char *p = open + 1;
+    while ((*p == ' ') || (*p == '\t')) { p++; }
+    if (*p != '"')
+    {
+        generator_error(ctx, st->lineno, "%s requires a quoted path", word);
+        return -1;
+    }
+
+    const char *start = ++p;
+    while ((*p != '\0') && (*p != '"'))
+    {
+        unsigned char c = (unsigned char)*p;
+        if ((c < 0x20u) || (c == 0x7fu) || (*p == '\\'))
+        {
+            generator_error(ctx, st->lineno, "the path contains an unsafe character");
+            return -1;
+        }
+        p++;
+    }
+    if (*p != '"')
+    {
+        generator_error(ctx, st->lineno, "the closing quote is missing");
+        return -1;
+    }
+
+    size_t n = (size_t)(p - start);
+    if ((n == 0u) || (n >= GENERATOR_MAX_URL))
+    {
+        generator_error(ctx, st->lineno, "the path is missing or too long");
+        return -1;
+    }
+    memcpy(out, start, n);
+    out[n] = '\0';
+
+    p++;
+    while ((*p == ' ') || (*p == '\t')) { p++; }
+    if (*p != ')')
+    {
+        generator_error(ctx, st->lineno, "close %s with ')'", word);
+        return -1;
+    }
+    p++;
+    while ((*p == ' ') || (*p == '\t')) { p++; }
+    if (*p != '\0')
+    {
+        generator_error(ctx, st->lineno, "do not put other text after %s(\"...\")", word);
+        return -1;
+    }
+    return 0;
+}
+
+typedef struct
+{
+    char names[GENERATOR_MAX_PARAMS][GENERATOR_MAX_NAME];
+    int  count;
+} Placeholders;
+
+static int validate_placeholder(Generator *ctx, ParseState *st, const char *url, const char *p, size_t n, Placeholders *seen)
+{
+    assert(ctx != NULL);
+    assert(seen != NULL);
+
+    if ((n < 3u) || (p[n - 1u] != '}') || (memchr(p + 1, '{', n - 1u) != NULL) || (memchr(p + 1, '}', n - 2u) != NULL) || ((n - 2u) >= GENERATOR_MAX_NAME) || (seen->count >= GENERATOR_MAX_PARAMS))
+    {
+        generator_error(ctx, st->lineno, "invalid placeholder in path '%s'", url);
+        return -1;
+    }
+
+    char name[GENERATOR_MAX_NAME];
+    memcpy(name, p + 1, n - 2u);
+    name[n - 2u] = '\0';
+
+    if (is_safe_identifier(name) == 0)
+    {
+        generator_error(ctx, st->lineno, "unsafe placeholder name '%s'", name);
+        return -1;
+    }
+
+    for (int i = 0; i < seen->count; i++)
+    {
+        if (word_equals(seen->names[i], name) == 1)
+        {
+            generator_error(ctx, st->lineno, "placeholder '%s' appears twice", name);
+            return -1;
+        }
+    }
+
+    (void)snprintf(seen->names[seen->count], GENERATOR_MAX_NAME, "%s", name);
+    seen->count++;
+
+    return 0;
+}
+
