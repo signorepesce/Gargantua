@@ -337,3 +337,166 @@ static int validate_placeholder(Generator *ctx, ParseState *st, const char *url,
     return 0;
 }
 
+static int validate_route_segment(Generator *ctx, ParseState *st, const char *url, const char *p, size_t n, Placeholders *seen)
+{
+    assert(ctx != NULL);
+
+    if (n == 0u)
+    {
+        generator_error(ctx, st->lineno, "path '%s' has an empty segment", url);
+        return -1;
+    }
+
+    if (((n == 1u) && (p[0] == '.')) || ((n == 2u) && (p[0] == '.') && (p[1] == '.')))
+    {
+        generator_error(ctx, st->lineno, "path '%s' contains a dot segment", url);
+        return -1;
+    }
+
+    if (p[0] == '{') { return validate_placeholder(ctx, st, url, p, n, seen); }
+
+    if ((memchr(p, '{', n) != NULL) || (memchr(p, '}', n) != NULL))
+    {
+        generator_error(ctx, st->lineno, "'{' and '}' must cover a whole segment");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int route_url_shape_valid(Generator *ctx, ParseState *st, const char *url)
+{
+    assert(ctx != NULL);
+
+    if ((url[0] != '/') || (strchr(url, '?') != NULL) || (strchr(url, '#') != NULL) || (strchr(url, '\\') != NULL))
+    {
+        generator_error(ctx, st->lineno, "path '%s' must be a clean absolute path", url);
+        return -1;
+    }
+
+    if ((url[1] != '\0') && (url[strlen(url) - 1u] == '/'))
+    {
+        generator_error(ctx, st->lineno, "path '%s' must not end with '/'", url);
+        return -1;
+    }
+
+    return 0;
+}
+
+int validate_route_url(Generator *ctx, ParseState *st, const char *url)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+    assert(url != NULL);
+
+    if (route_url_shape_valid(ctx, st, url) != 0) { return -1; }
+
+    Placeholders seen  = {0};
+    const char  *p     = url + 1;
+    int          count = 0;
+
+    while (*p != '\0')
+    {
+        if (count >= GENERATOR_MAX_ROUTE_SEGMENTS)
+        {
+            generator_error(ctx, st->lineno, "too many path segments");
+            return -1;
+        }
+
+        const char *slash = strchr(p, '/');
+        size_t      n     = (slash != NULL) ? (size_t)(slash - p) : strlen(p);
+
+        if (validate_route_segment(ctx, st, url, p, n, &seen) != 0) { return -1; }
+
+        count++;
+        if (slash == NULL) { break; }
+        p = slash + 1;
+    }
+
+    return 0;
+}
+
+static int parse_collection_return(Generator *ctx, ParseState *st, ParsedRoute *r, char *return_type)
+{
+    assert(ctx != NULL);
+    assert(r != NULL);
+    assert(return_type != NULL);
+
+    if ((strncmp(return_type, "$list(", 6u) != 0) && (strncmp(return_type, "$page(", 6u) != 0)) { return 0; }
+
+    size_t n = strlen(return_type);
+    if ((n < 8u) || (return_type[n - 1u] != ')'))
+    {
+        generator_error(ctx, st->lineno, "use $list(Type) or $page(Type)");
+        return -1;
+    }
+
+    r->collection = (return_type[1] == 'l') ? 1 : 2;
+    return_type[n - 1u] = '\0';
+
+    if (is_safe_identifier(return_type + 6) == 0)
+    {
+        generator_error(ctx, st->lineno, "invalid collection type");
+        return -1;
+    }
+
+    (void)snprintf(r->return_type, sizeof(r->return_type), "%s", return_type + 6);
+
+    return 0;
+}
+
+static void classify_params(ParsedRoute *r, int *bodies, int *paths)
+{
+    assert(r != NULL);
+    assert(bodies != NULL);
+    assert(paths != NULL);
+
+    *bodies = 0;
+    *paths  = 0;
+
+    for (int k = 0; (k < r->param_count) && (k < GENERATOR_MAX_PARAMS); k++)
+    {
+        if (r->params[k].is_body == 1)
+        {
+            (*bodies)++;
+            continue;
+        }
+
+        if (url_has_param(r->url, r->params[k].name) == 1)
+        {
+            r->params[k].is_query  = 0;
+            r->params[k].path_slot = url_param_slot(r->url, r->params[k].name);
+            (*paths)++;
+        }
+        else
+        {
+            r->params[k].is_query = 1;
+        }
+    }
+}
+
+static int route_params_consistent(Generator *ctx, ParseState *st, ParsedRoute *r)
+{
+    assert(ctx != NULL);
+    assert(r != NULL);
+
+    int bodies = 0;
+    int paths  = 0;
+    classify_params(r, &bodies, &paths);
+
+    if (bodies > 1)
+    {
+        generator_error(ctx, st->lineno, "%s takes %d bodies; only one is allowed", r->function_name, bodies);
+        return -1;
+    }
+
+    int wanted = count_url_params(r->url);
+    if (wanted != paths)
+    {
+        generator_error(ctx, st->lineno, "path '%s' has %d {…} segment(s)" " but %s takes %d with a matching name", r->url, wanted, r->function_name, paths);
+        return -1;
+    }
+
+    return 0;
+}
+
