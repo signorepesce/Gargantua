@@ -500,3 +500,175 @@ static int route_params_consistent(Generator *ctx, ParseState *st, ParsedRoute *
     return 0;
 }
 
+static void take_pending_annotations(Generator *ctx, ParseState *st, ParsedRoute *r)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+    assert(r != NULL);
+
+    r->authenticated = st->pending_auth;
+    r->public_route  = st->pending_public;
+    (void)snprintf(r->role, sizeof(r->role), "%s", st->pending_role);
+
+    if (r->public_route && (r->authenticated || r->role[0])) { generator_error(ctx, st->lineno, "$public cannot be combined with authentication"); }
+
+    r->transactional = st->pending_transactional;
+    (void)snprintf(r->produces, sizeof(r->produces), "%s", st->pending_produces);
+
+    st->pending_produces[0]   = '\0';
+    st->pending_auth          = 0;
+    st->pending_public        = 0;
+    st->pending_role[0]       = '\0';
+    st->pending_transactional = 0;
+}
+
+static int parse_route_signature(Generator *ctx, ParseState *st, const char *line, char *function_name, char *return_type, size_t cap)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+    assert(line != NULL);
+
+    const char *last_close = strrchr(line, ')');
+    if ((last_close == NULL) || (last_close[1] != '\0'))
+    {
+        generator_error(ctx, st->lineno, "the handler signature must be alone on its line");
+        return -1;
+    }
+
+    if (extract_return_type(line, return_type, cap) != 0)
+    {
+        generator_error(ctx, st->lineno, "after %s(\"%s\") expected 'type name(void)'", st->route_method, st->route_url);
+        return -1;
+    }
+
+    if (extract_function_name(line, function_name, cap) != 0)
+    {
+        generator_error(ctx, st->lineno, "after %s(\"%s\") expected a function signature", st->route_method, st->route_url);
+        return -1;
+    }
+
+    return 0;
+}
+
+void parse_route(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    st->route_armed = 0;
+
+    if (ctx->route_count >= GENERATOR_MAX_ROUTES)
+    {
+        generator_error(ctx, st->lineno, "too many routes (limit %d)", GENERATOR_MAX_ROUTES);
+        return;
+    }
+
+    char function_name[GENERATOR_MAX_NAME];
+    char return_type[GENERATOR_MAX_NAME];
+    if (parse_route_signature(ctx, st, line, function_name, return_type, sizeof(return_type)) != 0) { return; }
+
+    ParsedRoute *r = &ctx->routes[ctx->route_count];
+    memset(r, 0, sizeof(*r));
+    (void)snprintf(r->method, sizeof(r->method), "%s", st->route_method);
+    (void)snprintf(r->url, sizeof(r->url), "%s", st->route_url);
+    (void)snprintf(r->function_name, sizeof(r->function_name), "%s", function_name);
+    (void)snprintf(r->return_type, sizeof(r->return_type), "%s", return_type);
+
+    if (parse_collection_return(ctx, st, r, return_type) != 0) { return; }
+
+    r->line       = st->lineno;
+    r->file_index = ctx->file_count - 1;
+
+    if (extract_params(ctx, st, line, r, 0) != 0) { return; }
+    if (route_params_consistent(ctx, st, r) != 0) { return; }
+
+    take_pending_annotations(ctx, st, r);
+
+    ctx->route_count++;
+
+    if (ctx->file_count > 0) { ctx->files[ctx->file_count - 1].has_route = 1; }
+}
+
+void parse_service(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+    assert(line != NULL);
+
+    if (ctx->service_count >= GENERATOR_MAX_SERVICES)
+    {
+        generator_error(ctx, st->lineno, "too many transactional services (limit %d)", GENERATOR_MAX_SERVICES);
+        st->pending_transactional = 0;
+        return;
+    }
+    const char *last_close = strrchr(line, ')');
+    if (last_close == NULL || last_close[1] != '\0')
+    {
+        generator_error(ctx, st->lineno, "after $transactional expected a service signature alone on its line");
+        st->pending_transactional = 0;
+        return;
+    }
+
+    ParsedService *service = &ctx->services[ctx->service_count];
+    ParsedRoute temporary;
+    memset(service, 0, sizeof(*service));
+    memset(&temporary, 0, sizeof(temporary));
+    if (extract_return_type(line, service->return_type, sizeof(service->return_type)) != 0 || extract_function_name(line, service->function_name, sizeof(service->function_name)) != 0)
+    {
+        generator_error(ctx, st->lineno, "a transactional service requires a plain signature without pointers");
+        st->pending_transactional = 0;
+        return;
+    }
+    if (extract_params(ctx, st, line, &temporary, 1) != 0)
+    {
+        st->pending_transactional = 0;
+        return;
+    }
+    service->param_count = temporary.param_count;
+    memcpy(service->params, temporary.params, sizeof(service->params));
+    service->line = st->lineno;
+    service->file_index = ctx->file_count - 1;
+    ctx->service_count++;
+    if (ctx->file_count > 0) { ctx->files[ctx->file_count - 1].has_service = 1; }
+    st->pending_transactional = 0;
+}
+
+void guard_transaction(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+    assert(line != NULL);
+
+    int opens  = 0;
+    int closes = 0;
+    for (int i = 0; (i < GENERATOR_MAX_LINE) && (line[i] != '\0'); i++)
+    {
+        if (line[i] == '{') { opens++; }
+        if (line[i] == '}') { closes++; }
+    }
+
+    if ((st->transaction_depth > 0) && (st->brace_depth >= st->transaction_depth) && (strstr(line, "return") != NULL) && (strstr(line, "$throw") == NULL))
+    {
+        generator_error(ctx, st->lineno, "do not use return inside $transaction { }:" " the COMMIT would never run and data would be lost." " Use $throw to fail, or $transactional on the handler");
+    }
+
+    const char *found = strstr(line, "$transaction");
+    if (found != NULL)
+    {
+        char after = found[12];
+        if ((isalnum((unsigned char)after) == 0) && (after != '_')) { st->transaction_block_armed = 1; }
+    }
+
+    st->brace_depth += opens;
+
+    if ((st->transaction_block_armed == 1) && (opens > 0))
+    {
+        st->transaction_depth = st->brace_depth;
+        st->transaction_block_armed   = 0;
+    }
+
+    st->brace_depth -= closes;
+
+    if ((st->transaction_depth > 0) && (st->brace_depth < st->transaction_depth)) { st->transaction_depth = 0; }
+    if (st->brace_depth < 0) { st->brace_depth = 0; }
+}
