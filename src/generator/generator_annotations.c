@@ -218,3 +218,206 @@ int parse_repeat_annotation(Generator *ctx, ParseState *st, const char *line)
     return 1;
 }
 
+void parse_task(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    st->task_armed = 0;
+
+    if (ctx->task_count >= SCHEDULER_MAX_TASKS)
+    {
+        generator_error(ctx, st->lineno, "too many tasks (limit %d)", SCHEDULER_MAX_TASKS);
+        return;
+    }
+
+    char function_name[GENERATOR_MAX_NAME];
+    char return_type[GENERATOR_MAX_NAME];
+
+    if ((extract_return_type(line, return_type, sizeof(return_type)) != 0) || (extract_function_name(line, function_name, sizeof(function_name)) != 0))
+    {
+        generator_error(ctx, st->lineno, "after $repeat expected 'void name(void)'");
+        return;
+    }
+    if (strcmp(return_type, "void") != 0)
+    {
+        generator_error(ctx, st->lineno, "'%s' must return void", function_name);
+        return;
+    }
+
+    ParsedRoute probe;
+    memset(&probe, 0, sizeof(probe));
+    if ((extract_params(ctx, st, line, &probe, 1) != 0) || (probe.param_count != 0))
+    {
+        generator_error(ctx, st->lineno, "'%s' takes no parameters", function_name);
+        return;
+    }
+
+    ParsedTask *task = &ctx->tasks[ctx->task_count];
+    memset(task, 0, sizeof(*task));
+    (void)snprintf(task->function_name, sizeof(task->function_name), "%s", function_name);
+    task->interval_ms = st->pending_interval_ms;
+    task->line        = st->lineno;
+    task->file_index  = ctx->file_count - 1;
+
+    ctx->task_count++;
+
+    if (ctx->file_count > 0) { ctx->files[ctx->file_count - 1].has_task = 1; }
+}
+
+int parse_auth_annotation(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    if (strcmp(line, "$authenticated") == 0)
+    {
+        st->pending_auth = 1;
+        return 1;
+    }
+    if (strcmp(line, "$public") == 0)
+    {
+        st->pending_public = 1;
+        return 1;
+    }
+    if (strncmp(line, "$role(", 6u) != 0) { return 0; }
+
+    char role[GENERATOR_MAX_URL];
+    if (parse_route_url(ctx, st, line, "$role", role) != 0) { return 1; }
+    if ((strcmp(role, "admin") != 0) && (strcmp(role, "user") != 0))
+    {
+        generator_error(ctx, st->lineno, "$role supports admin or user");
+        return 1;
+    }
+
+    (void)snprintf(st->pending_role, sizeof(st->pending_role), "%s", role);
+
+    return 1;
+}
+
+int parse_transactional_annotation(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    if (word_equals(line, "$transactional") != 1) { return 0; }
+
+    if (st->brace_depth != 0)
+    {
+        generator_error(ctx, st->lineno, "$transactional is allowed only before a function");
+        return 1;
+    }
+    if (st->pending_transactional == 1)
+    {
+        generator_error(ctx, st->lineno, "duplicate $transactional");
+        return 1;
+    }
+
+    st->pending_transactional = 1;
+
+    return 1;
+}
+
+int arm_route_annotation(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    char head[GENERATOR_MAX_LINE];
+    (void)snprintf(head, sizeof(head), "%s", line);
+
+    char *paren = strchr(head, '(');
+    if (paren == NULL) { return 0; }
+    *paren = '\0';
+
+    char       *word   = line_trim(head);
+    const char *method = http_method_from_word(word);
+    if (method == NULL) { return 0; }
+
+    char url[GENERATOR_MAX_URL];
+    if ((parse_route_url(ctx, st, line, word, url) != 0) || (validate_route_url(ctx, st, url) != 0)) { return 1; }
+
+    (void)snprintf(st->route_method, sizeof(st->route_method), "%s", method);
+    (void)snprintf(st->route_url, sizeof(st->route_url), "%s", url);
+    st->route_armed = 1;
+
+    return 1;
+}
+
+void open_type(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    char name[GENERATOR_MAX_NAME];
+    if (parse_table_name(ctx, st->lineno, line, name, sizeof(name)) != 0) { return; }
+
+    for (int i = 0; (i < ctx->type_count) && (i < GENERATOR_MAX_TYPES); i++)
+    {
+        if (word_equals(ctx->types[i].name, name) == 1)
+        {
+            generator_error(ctx, st->lineno, "table '%s' is already declared", name);
+            return;
+        }
+    }
+
+    if (ctx->type_count >= GENERATOR_MAX_TYPES)
+    {
+        generator_error(ctx, st->lineno, "too many tables (limit %d)", GENERATOR_MAX_TYPES);
+        return;
+    }
+
+    st->current_type = &ctx->types[ctx->type_count];
+    memset(st->current_type, 0, sizeof(*st->current_type));
+    (void)snprintf(st->current_type->name, sizeof(st->current_type->name), "%s", name);
+    st->current_type->json_only     = strncmp(line, "$json", 5u) == 0;
+    st->current_type->line       = st->lineno;
+    st->current_type->file_index = ctx->file_count - 1;
+
+    st->in_struct = 1;
+    st->need_open = 1;
+    st->pending   = 0u;
+    ctx->type_count++;
+
+    if (ctx->file_count > 0) { ctx->files[ctx->file_count - 1].has_table = 1; }
+}
+
+void drop_dangling_auth(Generator *ctx, ParseState *st)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    if ((st->pending_auth != 0) || (st->pending_public != 0) || (st->pending_role[0] != '\0'))
+    {
+        generator_error(ctx, st->lineno, "authentication annotation must precede a route");
+
+        st->pending_auth    = 0;
+        st->pending_public  = 0;
+        st->pending_role[0] = '\0';
+    }
+
+    if (st->pending_produces[0] != '\0')
+    {
+        generator_error(ctx, st->lineno, "$produces must precede a route annotation");
+        st->pending_produces[0] = '\0';
+    }
+}
+
+int report_removed_annotation(Generator *ctx, ParseState *st, const char *line)
+{
+    assert(ctx != NULL);
+    assert(st != NULL);
+
+    if (strncmp(line, "$entity", 7u) == 0)
+    {
+        generator_error(ctx, st->lineno, "$entity was removed; use $table(Name)");
+        return 1;
+    }
+    if (strncmp(line, "$dto", 4u) == 0)
+    {
+        generator_error(ctx, st->lineno, "$dto was removed; use $json(Name)");
+        return 1;
+    }
+
+    return 0;
+}
