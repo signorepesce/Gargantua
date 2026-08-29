@@ -145,3 +145,132 @@ static void emit_crud_args(FILE *out, const ParsedType *t, const ParsedField *pk
     (void)fprintf(out, ")");
 }
 
+static void emit_sql_fragment(FILE *out, const char *text, int bytes)
+{
+    assert(out != NULL);
+    assert(text != NULL && strlen(text) < GENERATOR_MAX_PATH);
+
+    for (size_t i = 0u; text[i] != '\0'; i++)
+    {
+        if (bytes != 0)
+        {
+            (void)fprintf(out, "%u,", (unsigned)(unsigned char)text[i]);
+            if ((i % 16u) == 15u) { (void)fputc('\n', out); }
+        }
+        else
+        {
+            if (text[i] == '"' || text[i] == '\\') { (void)fputc('\\', out); }
+            (void)fputc(text[i], out);
+        }
+    }
+}
+
+static void emit_sql_name(FILE *out, const char *name, int bytes)
+{
+    assert(out != NULL);
+    assert(name != NULL);
+
+    emit_sql_fragment(out, "\"", bytes);
+    emit_sql_fragment(out, name, bytes);
+    emit_sql_fragment(out, "\"", bytes);
+}
+
+static void emit_crud_insert(FILE *out, const ParsedType *t, const ParsedField *pk)
+{
+    assert(out != NULL);
+    assert(t != NULL && pk != NULL);
+
+    int bytes = t->field_count > 32 ? 1 : 0;
+    (void)fprintf(out, "\nint %s_insert(%s wrap_row)\n{\n" "    if (wrap_row.%s != 0) { return -1; }\n" "    const char *wrap_bad = NULL;\n" "    if (validate_struct(&%s__type, &wrap_row, &wrap_bad) != 0) { return -1; }\n" "    static const char wrap_sql[] = %s", t->name, t->name, pk->name, t->name, bytes != 0 ? "{\n" : "\"");
+
+    emit_sql_fragment(out, "INSERT INTO ", bytes);
+    emit_sql_name(out, t->name, bytes);
+    if (t->field_count == 1)
+    {
+        emit_sql_fragment(out, " DEFAULT VALUES", bytes);
+    }
+    else
+    {
+        emit_sql_fragment(out, " (", bytes);
+        int first = 1;
+        for (int i = 0; (i < t->field_count) && (i < GENERATOR_MAX_FIELDS); i++)
+        {
+            if (&t->fields[i] == pk) { continue; }
+            if (first == 0) { emit_sql_fragment(out, ", ", bytes); }
+            emit_sql_name(out, t->fields[i].name, bytes);
+            first = 0;
+        }
+        emit_sql_fragment(out, ") VALUES (", bytes);
+        first = 1;
+        for (int i = 0; (i < t->field_count) && (i < GENERATOR_MAX_FIELDS); i++)
+        {
+            if (&t->fields[i] == pk) { continue; }
+            emit_sql_fragment(out, first == 1 ? "?" : ", ?", bytes);
+            first = 0;
+        }
+        emit_sql_fragment(out, ")", bytes);
+    }
+    emit_sql_fragment(out, " RETURNING ", bytes);
+    emit_sql_name(out, pk->name, bytes);
+    (void)fprintf(out, "%s\n    return db_insert_id(wrap_sql,\n        ", bytes != 0 ? "0};" : "\";");
+    emit_crud_args(out, t, pk, 0);
+    (void)fprintf(out, ");\n}\n");
+}
+
+static void emit_crud_update(FILE *out, const ParsedType *t, const ParsedField *pk)
+{
+    assert(out != NULL);
+    assert(t != NULL && pk != NULL);
+
+    (void)fprintf(out, "\nint %s_update(%s wrap_row)\n{\n" "    if (wrap_row.%s <= 0) { return -1; }\n", t->name, t->name, pk->name);
+    if (t->field_count == 1)
+    {
+        (void)fprintf(out, "    return %s_exists(wrap_row.%s);\n}\n", t->name, pk->name);
+        return;
+    }
+
+    int bytes = t->field_count > 32 ? 1 : 0;
+    (void)fprintf(out, "    const char *wrap_bad = NULL;\n" "    if (validate_struct(&%s__type, &wrap_row, &wrap_bad) != 0) { return -1; }\n" "    static const char wrap_sql[] = %s", t->name, bytes != 0 ? "{\n" : "\"");
+    emit_sql_fragment(out, "UPDATE ", bytes);
+    emit_sql_name(out, t->name, bytes);
+    emit_sql_fragment(out, " SET ", bytes);
+    int first = 1;
+    for (int i = 0; (i < t->field_count) && (i < GENERATOR_MAX_FIELDS); i++)
+    {
+        if (&t->fields[i] == pk) { continue; }
+        if (first == 0) { emit_sql_fragment(out, ", ", bytes); }
+        emit_sql_name(out, t->fields[i].name, bytes);
+        emit_sql_fragment(out, " = ?", bytes);
+        first = 0;
+    }
+    emit_sql_fragment(out, " WHERE ", bytes);
+    emit_sql_name(out, pk->name, bytes);
+    emit_sql_fragment(out, " = ?", bytes);
+    (void)fprintf(out, "%s\n    int wrap_rc = db_execute(wrap_sql,\n        ", bytes != 0 ? "0};" : "\";");
+    emit_crud_args(out, t, pk, 1);
+    (void)fprintf(out, ");\n    return (wrap_rc == 0 || wrap_rc == 1) ? wrap_rc : -1;\n}\n");
+}
+
+void emit_crud(FILE *out, const ParsedType *t)
+{
+    assert(out != NULL);
+    assert(t != NULL);
+
+    (void)fprintf(out, "\n%s %s_at(RowList wrap_list, int wrap_index)\n{\n" "    %s wrap_row = {0};\n" "    if (wrap_list.type != &%s__type || wrap_list.items == NULL ||\n" "        wrap_index < 0 || wrap_index >= wrap_list.count || wrap_list.count > PAGE_MAX)\n" "    {\n        request_fail(500, \"invalid list index or type\");\n" "        return wrap_row;\n    }\n" "    memcpy(&wrap_row, (const unsigned char *)wrap_list.items +\n" "           (size_t)wrap_index * sizeof(wrap_row), sizeof(wrap_row));\n" "    return wrap_row;\n}\n", t->name, t->name, t->name, t->name);
+    (void)fprintf(out, "\n%s %s_apply(%s current, %s changes)\n{\n" "    if (patch_apply(&%s__type, &current, &changes) != 0)\n" "    {\n        request_raise(request_failed() ? request_fail_status() : 500, request_failed() ? request_fail_message() : \"invalid patch context\");\n    }\n" "    return current;\n}\n", t->name, t->name, t->name, t->name, t->name);
+    const ParsedField *pk = find_primary_key(t);
+    if (pk == NULL || t->json_only != 0) { return; }
+    (void)fprintf(out, "\nRowList %s_page(int wrap_page, int wrap_size)\n{\n" "    return db_query_page(&%s__type, \"%s\", NULL, 0, wrap_page, wrap_size);\n}\n" "\nRowList %s_list(int wrap_limit)\n{\n" "    return %s_page(0, wrap_limit);\n}\n", t->name, t->name, pk->name, t->name, t->name);
+    for (int i = 0; i < t->field_count; i++)
+    {
+        const ParsedField *f = &t->fields[i];
+        if (f->references[0] == '\0') { continue; }
+        (void)fprintf(out, "\nRowList %s_page_by_%s(int wrap_id, int wrap_page, int wrap_size)\n{\n" "    return db_query_page(&%s__type, \"%s\", \"%s\", wrap_id, wrap_page, wrap_size);\n}\n" "\n%s %s_fetch_%s(%s wrap_row)\n{\n" "    return %s_find(wrap_row.%s);\n}\n", t->name, f->name, t->name, pk->name, f->name, f->references, t->name, f->name, t->name, f->references, f->name);
+    }
+
+    (void)fprintf(out, "_Static_assert(%d <= DB_MAX_ARGS, \"CRUD argument limit\");\n", t->field_count);
+    emit_crud_reads(out, t, pk);
+    emit_crud_insert(out, t, pk);
+    emit_crud_update(out, t, pk);
+    (void)fprintf(out, "\nint %s_save(%s wrap_row)\n{\n" "    if (wrap_row.%s == 0) { return %s_insert(wrap_row); }\n" "    int wrap_rc = %s_update(wrap_row);\n" "    return (wrap_rc == 1) ? wrap_row.%s : wrap_rc;\n}\n", t->name, t->name, pk->name, t->name, t->name, pk->name);
+}
