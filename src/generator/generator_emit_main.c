@@ -172,3 +172,179 @@ static int emit_model_includes(FILE *out, const Generator *ctx)
     return 0;
 }
 
+static void emit_declarations(FILE *out, const Generator *ctx)
+{
+    assert(out != NULL);
+    assert(ctx != NULL);
+
+    if (ctx->type_count > 0)
+    {
+        (void)fprintf(out, "\n");
+        for (int i = 0; (i < ctx->type_count) && (i < GENERATOR_MAX_TYPES); i++) { (void)fprintf(out, "extern const TypeInfo %s__type;\n", ctx->types[i].name); }
+
+        (void)fprintf(out, "\n");
+        for (int i = 0; (i < ctx->type_count) && (i < GENERATOR_MAX_TYPES); i++) { emit_crud_declarations(out, &ctx->types[i]); }
+    }
+
+    emit_store_declarations(out, ctx);
+
+    (void)fprintf(out, "\n");
+    for (int i = 0; (i < ctx->service_count) && (i < GENERATOR_MAX_SERVICES); i++)
+    {
+        const ParsedService *service = &ctx->services[i];
+        (void)fprintf(out, "%s %s(", service->return_type, service->function_name);
+        emit_service_params(out, service, 0);
+        (void)fprintf(out, ");\n");
+    }
+}
+
+static void emit_plain_includes(FILE *out, const Generator *ctx)
+{
+    assert(out != NULL);
+    assert(ctx != NULL);
+
+    (void)fprintf(out, "\n");
+    for (int i = 0; (i < ctx->file_count) && (i < GENERATOR_MAX_FILES); i++)
+    {
+        const SourceFile *in = &ctx->files[i];
+        if ((in->has_table == 0) && (in->has_route == 0) && (in->has_service == 0) && (in->has_task == 0)) { (void)fprintf(out, "#include \"%s\"\n", in->path); }
+    }
+}
+
+static int emit_services(FILE *out, const Generator *ctx)
+{
+    assert(out != NULL);
+    assert(ctx != NULL);
+
+    for (int i = 0; (i < ctx->file_count) && (i < GENERATOR_MAX_FILES); i++)
+    {
+        if (ctx->files[i].has_service && (emit_service_input(out, ctx, i) != 0))
+        {
+            (void)fprintf(stderr, "service file %s was not transformed\n", ctx->files[i].path);
+            return -1;
+        }
+    }
+
+    for (int i = 0; (i < ctx->service_count) && (i < GENERATOR_MAX_SERVICES); i++) { emit_service_wrapper(out, &ctx->services[i]); }
+
+    return 0;
+}
+
+static void emit_controller_includes(FILE *out, const Generator *ctx)
+{
+    assert(out != NULL);
+    assert(ctx != NULL);
+
+    (void)fprintf(out, "\n");
+    for (int i = 0; (i < ctx->file_count) && (i < GENERATOR_MAX_FILES); i++)
+    {
+        const SourceFile *in = &ctx->files[i];
+        if ((in->has_table == 0) && ((in->has_route == 1) || (in->has_task == 1))) { (void)fprintf(out, "#include \"%s\"\n", in->path); }
+    }
+    (void)fprintf(out, "\n");
+}
+
+static void emit_type_tables(FILE *out, const Generator *ctx)
+{
+    assert(out != NULL);
+    assert(ctx != NULL);
+
+    for (int i = 0; (i < ctx->type_count) && (i < GENERATOR_MAX_TYPES); i++)
+    {
+        const ParsedType *type = &ctx->types[i];
+        emit_fields(out, type);
+        emit_type(out, type);
+        emit_crud(out, type);
+    }
+}
+
+static void emit_main(FILE *out)
+{
+    assert(out != NULL);
+
+    (void)fprintf(out, "\n/* Entry point. You do not write this. */\n" "#include \"config.h\"\n" "#include \"migrate.h\"\n" "#include \"db.h\"\n" "#include \"server.h\"\n" "#include \"scheduler.h\"\n" "#include \"fetch.h\"\n" "#include \"template.h\"\n" "#include <stdio.h>\n" "#include <string.h>\n\n" "int main(void)\n" "{\n" "    if (config_load(CONFIG_FILE) < 0)\n" "    {\n" "        return 1;\n" "    }\n\n" "    if (fetch_init() != 0 || template_init() != 0) { return 1; }\n" "    if (auth_init() != 0 || db_limits(config_int(\"database.busy_ms\", 1000),\n" "        config_int(\"database.query_ms\", 5000)) != 0) { return 1; }\n" "    str configured_db = config_str(\"database.driver\"," " db_name());\n" "    if (strcmp(configured_db, db_name()) != 0)\n" "    {\n" "        (void)fprintf(stderr," " \"database.driver=%%s but driver %%s was built\\n\"," " configured_db, db_name());\n" "        return 1;\n" "    }\n\n" "    {\n" "        str url = config_str(\"database.url\", \":memory:\");\n" "        if ((url[0] == '\\0') || (db_open(url) != 0))\n" "        {\n" "            (void)fprintf(stderr," " \"database.url is missing or the connection failed\\n\");\n" "            return 1;\n" "        }\n" "        (void)printf(\"database: %%s (connected)\\n\"," " db_name());\n" "    }\n\n" "    if (migrate_run(config_str(\"database.migrations\", \"\")) != 0)\n" "    {\n        db_close();\n        return 1;\n    }\n" "    int port = config_int(\"server.port\", 8100);\n" "    if ((port <= 0) || (port > 65535))\n" "    {\n" "        port = 8100;\n" "    }\n\n" "    if (scheduler_start() != 0)\n" "    {\n        db_close();\n        return 1;\n    }\n\n" "    int rc = server_run(port);\n\n" "    scheduler_stop();\n" "    fetch_shutdown();\n" "    db_close();\n" "    return (rc == 0) ? 0 : 1;\n" "}\n");
+}
+
+int generator_write_source(const Generator *ctx, const char *out_path)
+{
+    assert(ctx != NULL);
+    assert(out_path != NULL);
+
+    FILE *out = fopen(out_path, "w");
+    if (out == NULL)
+    {
+        (void)fprintf(stderr, "gargantua: could not write %s\n", out_path);
+        return -1;
+    }
+
+    (void)fprintf(out, "/* Generated by gargantua. Do not edit. */\n" "#include \"gargantua.h\"\n" "#include \"db.h\"\n" "#include \"route.h\"\n" "#include \"scheduler.h\"\n" "#include \"fetch.h\"\n" "#include \"template.h\"\n" "#include \"store.h\"\n" "#include <string.h>\n" "#include <limits.h>\n\n");
+
+    if ((emit_model_includes(out, ctx) != 0))
+    {
+        (void)fclose(out);
+        return -1;
+    }
+
+    emit_declarations(out, ctx);
+    emit_plain_includes(out, ctx);
+
+    if (emit_services(out, ctx) != 0)
+    {
+        (void)fclose(out);
+        return -1;
+    }
+
+    emit_controller_includes(out, ctx);
+    emit_type_tables(out, ctx);
+    emit_stores(out, ctx);
+
+    if (ctx->route_count > 0) { emit_route_wrappers(out, ctx); }
+    if (generator_write_openapi(out, ctx) != 0)
+    {
+        (void)fclose(out);
+        return -1;
+    }
+
+    emit_route_table(out, ctx);
+    emit_task_table(out, ctx);
+
+    if (ctx->want_main == 1) { emit_main(out); }
+
+    if (fclose(out) != 0)
+    {
+        (void)fprintf(stderr, "gargantua: could not close %s\n", out_path);
+        return -1;
+    }
+
+    return 0;
+}
+
+int generator_write_header(const Generator *ctx, const char *out_path)
+{
+    assert(ctx != NULL);
+    assert(out_path != NULL);
+
+    FILE *out = fopen(out_path, "w");
+    if (out == NULL)
+    {
+        (void)fprintf(stderr, "gargantua: could not write %s\n", out_path);
+        return -1;
+    }
+
+    (void)fprintf(out, "/* Generated by gargantua. Do not edit. */\n" "#ifndef GARGANTUA_TYPES_H\n" "#define GARGANTUA_TYPES_H\n\n" "#include \"gargantua.h\"\n\n");
+
+    for (int i = 0; (i < ctx->type_count) && (i < GENERATOR_MAX_TYPES); i++)
+    {
+        (void)fprintf(out, "typedef struct %s %s;\n" "extern const TypeInfo %s__type;\n", ctx->types[i].name, ctx->types[i].name, ctx->types[i].name);
+        emit_crud_declarations(out, &ctx->types[i]);
+    }
+
+    (void)fprintf(out, "\n#endif\n");
+
+    if (fclose(out) != 0)
+    {
+        (void)fprintf(stderr, "gargantua: could not close %s\n", out_path);
+        return -1;
+    }
+    return 0;
+}
