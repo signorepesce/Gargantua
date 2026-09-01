@@ -167,3 +167,162 @@ static void openapi_write_validation(OpenApiWriter *w, const ParsedField *field)
     }
 }
 
+static void openapi_write_scalar_field(OpenApiWriter *w, const ParsedField *field)
+{
+    assert(w != NULL);
+    assert(field != NULL);
+
+    const char *scalar = openapi_scalar_type(field->kind);
+    if (scalar == NULL)
+    {
+        w->failed = 1;
+        return;
+    }
+
+    if ((strcmp(field->kind, "FIELD_STR") == 0) && ((field->flags & 2u) == 0u))
+    {
+        scalar = "{\"type\":[\"string\",\"null\"]}";
+    }
+
+    char prefix[128];
+    (void)snprintf(prefix, sizeof(prefix), "%s", scalar);
+    prefix[strlen(prefix) - 1u] = '\0';
+    openapi_write_text(w, prefix);
+
+    openapi_write_validation(w, field);
+    openapi_write_text(w, "}");
+}
+
+static void openapi_write_required(OpenApiWriter *w, const ParsedType *type, int partial)
+{
+    assert(w != NULL);
+    assert(type != NULL);
+
+    int required = 0;
+    for (int i = 0; (i < type->field_count) && (w->failed == 0); i++)
+    {
+        if ((partial == 0) && ((type->fields[i].flags & 2u) != 0u))
+        {
+            openapi_write_text(w, (required == 0) ? ",\"required\":[" : ",");
+            openapi_write_quoted(w, type->fields[i].name);
+            required++;
+        }
+    }
+
+    if (required != 0) { openapi_write_text(w, "]"); }
+}
+
+static void openapi_write_type_schema(OpenApiWriter *w, const Generator *ctx, const ParsedType *type, int partial, unsigned depth)
+{
+    if ((depth >= 8u) || w->failed)
+    {
+        w->failed = 1;
+        return;
+    }
+
+    openapi_write_text(w, "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{");
+
+    for (int i = 0; (i < type->field_count) && (w->failed == 0); i++)
+    {
+        const ParsedField *field = &type->fields[i];
+
+        if (i != 0) { openapi_write_text(w, ","); }
+        openapi_write_quoted(w, field->name);
+        openapi_write_text(w, ":");
+
+        if (strcmp(field->kind, "FIELD_OBJECT") != 0)
+        {
+            openapi_write_scalar_field(w, field);
+        }
+        else if (partial == 0)
+        {
+            openapi_write_schema_ref(w, ctx, field->c_type);
+        }
+        else
+        {
+            openapi_write_inline_type(w, ctx, field->c_type, depth + 1u);
+        }
+    }
+
+    openapi_write_text(w, "}");
+    openapi_write_required(w, type, partial);
+    openapi_write_text(w, "}");
+}
+
+static void openapi_write_response(OpenApiWriter *w, const Generator *ctx, const ParsedRoute *route)
+{
+    if (route->collection == 2)
+    {
+        openapi_write_text(w, "{\"type\":\"object\",\"required\":[\"items\",\"page\",\"size\",\"hasMore\"]," "\"properties\":{\"items\":");
+    }
+    if (route->collection != 0) { openapi_write_text(w, "{\"type\":\"array\",\"maxItems\":100,\"items\":"); }
+    openapi_write_schema(w, ctx, route->return_type);
+    if (route->collection != 0) { openapi_write_text(w, "}"); }
+    if (route->collection == 2)
+    {
+        openapi_write_text(w, ",\"page\":{\"type\":\"integer\",\"format\":\"int32\",\"minimum\":0}," "\"size\":{\"type\":\"integer\",\"format\":\"int32\",\"minimum\":1,\"maximum\":100}," "\"hasMore\":{\"type\":\"boolean\"}}}");
+    }
+}
+
+static void openapi_write_error_responses(OpenApiWriter *w)
+{
+    static const char *const codes[] = {"400", "401", "403", "404", "405", "409", "413", "415", "429", "500", "503", "default"};
+    for (size_t i = 0u; i < sizeof(codes) / sizeof(codes[0]); i++)
+    {
+        openapi_write_text(w, ",");
+        openapi_write_quoted(w, codes[i]);
+        openapi_write_text(w, ":{\"$ref\":\"#/components/responses/GargantuaError\"}");
+    }
+}
+
+static void openapi_write_security(OpenApiWriter *w, const ParsedRoute *route)
+{
+    assert(w != NULL);
+    assert(route != NULL);
+
+    if (route->public_route)
+    {
+        openapi_write_text(w, ",\"security\":[]");
+    }
+    else if (route->authenticated || route->role[0])
+    {
+        openapi_write_text(w, ",\"security\":[{\"BearerAuth\":[]}]");
+    }
+    else
+    {
+        openapi_write_text(w, ",\"security\":[{},{\"BearerAuth\":[]}]," "\"x-security-config\":\"security.enabled\"");
+    }
+
+    if (route->role[0])
+    {
+        openapi_write_text(w, ",\"x-required-role\":");
+        openapi_write_quoted(w, route->role);
+    }
+}
+
+static void openapi_write_parameters(OpenApiWriter *w, const Generator *ctx, const ParsedRoute *route)
+{
+    assert(w != NULL);
+    assert(route != NULL);
+
+    int parameters = 0;
+
+    for (int i = 0; i < route->param_count; i++)
+    {
+        const ParsedParam *param = &route->params[i];
+        if (param->is_body != 0) { continue; }
+
+        openapi_write_text(w, (parameters == 0) ? ",\"parameters\":[" : ",");
+        parameters++;
+
+        openapi_write_text(w, "{\"name\":");
+        openapi_write_quoted(w, param->name);
+        openapi_write_text(w, (param->is_query != 0) ? ",\"in\":\"query\"" : ",\"in\":\"path\"");
+        openapi_write_text(w, (param->is_query == 0) ? ",\"required\":true,\"schema\":" : ",\"required\":false,\"schema\":");
+        openapi_write_schema(w, ctx, param->type);
+        openapi_write_text(w, "}");
+    }
+
+    if (parameters != 0) { openapi_write_text(w, "]"); }
+}
+
