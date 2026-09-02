@@ -326,3 +326,168 @@ static void openapi_write_parameters(OpenApiWriter *w, const Generator *ctx, con
     if (parameters != 0) { openapi_write_text(w, "]"); }
 }
 
+static void openapi_write_request_body(OpenApiWriter *w, const Generator *ctx, const ParsedRoute *route)
+{
+    assert(w != NULL);
+    assert(route != NULL);
+
+    for (int i = 0; i < route->param_count; i++)
+    {
+        if (route->params[i].is_body == 0) { continue; }
+
+        openapi_write_text(w, ",\"requestBody\":{\"required\":true,\"content\":" "{\"application/json\":{\"schema\":");
+
+        if (strcmp(route->method, "PATCH") != 0)
+        {
+            openapi_write_schema_ref(w, ctx, route->params[i].type);
+        }
+        else
+        {
+            openapi_write_inline_type(w, ctx, route->params[i].type, 0u);
+        }
+
+        openapi_write_text(w, "}}}");
+    }
+}
+
+static void openapi_write_success(OpenApiWriter *w, const Generator *ctx, const ParsedRoute *route)
+{
+    assert(w != NULL);
+    assert(route != NULL);
+
+    int post = (strcmp(route->method, "POST") == 0);
+
+    openapi_write_text(w, post ? ",\"responses\":{\"201\":{\"description\":\"Created\"" : ",\"responses\":{\"200\":{\"description\":\"Success\"");
+
+    if (post != 0)
+    {
+        openapi_write_text(w, ",\"headers\":{\"Location\":{\"description\":" "\"Resource URI, when supplied by the handler\"," "\"schema\":{\"type\":\"string\",\"format\":\"uri-reference\"}}}");
+    }
+
+    openapi_write_text(w, ",\"content\":{");
+    openapi_write_quoted(w, ((route->collection == 0) && (strcmp(route->return_type, "str") == 0)) ? "text/plain" : "application/json");
+    openapi_write_text(w, ":{\"schema\":");
+    openapi_write_response(w, ctx, route);
+    openapi_write_text(w, "}}}");
+}
+
+static void openapi_write_operation(OpenApiWriter *w, const Generator *ctx, const ParsedRoute *route)
+{
+    assert(w != NULL);
+    assert(route != NULL);
+
+    openapi_write_text(w, "{\"operationId\":");
+    openapi_write_quoted(w, route->function_name);
+
+    openapi_write_security(w, route);
+    openapi_write_parameters(w, ctx, route);
+    openapi_write_request_body(w, ctx, route);
+    openapi_write_success(w, ctx, route);
+    openapi_write_error_responses(w);
+
+    openapi_write_text(w, "}}");
+}
+
+static const char *openapi_method_name(const char *method)
+{
+    if (strcmp(method, "GET") == 0) { return "get"; }
+    if (strcmp(method, "POST") == 0) { return "post"; }
+    if (strcmp(method, "PUT") == 0) { return "put"; }
+    if (strcmp(method, "PATCH") == 0) { return "patch"; }
+    if (strcmp(method, "DELETE") == 0) { return "delete"; }
+    return NULL;
+}
+
+static int openapi_input_valid(const Generator *ctx)
+{
+    if ((ctx->type_count < 0) || (ctx->type_count > GENERATOR_MAX_TYPES) || (ctx->route_count < 0) || (ctx->route_count > GENERATOR_MAX_ROUTES) || (ctx->errors != 0)) { return 0; }
+    for (int i = 0; i < ctx->type_count; i++)
+    {
+        if ((ctx->types[i].field_count < 0) || (ctx->types[i].field_count > GENERATOR_MAX_FIELDS)) { return 0; }
+    }
+    for (int i = 0; i < ctx->route_count; i++)
+    {
+        const ParsedRoute *route = &ctx->routes[i];
+        if ((route->param_count < 0) || (route->param_count > GENERATOR_MAX_PARAMS) || (route->collection < 0) || (route->collection > 2) || (openapi_method_name(route->method) == NULL)) { return 0; }
+        if ((strcmp(route->url, "/openapi.json") == 0) && (strcmp(route->method, "GET") == 0)) { return 0; }
+        for (int j = 0; j < i; j++)
+        {
+            if ((strcmp(route->function_name, ctx->routes[j].function_name) == 0) || ((strcmp(route->url, ctx->routes[j].url) == 0) && (strcmp(route->method, ctx->routes[j].method) == 0))) { return 0; }
+        }
+    }
+    return 1;
+}
+
+static void openapi_write_document(OpenApiWriter *w, const Generator *ctx)
+{
+    openapi_write_text(w, "{\"openapi\":\"3.1.1\",\"info\":{\"title\":\"Gargantua API\",\"version\":\"1.0.0\"},\"paths\":{");
+    int emitted[GENERATOR_MAX_ROUTES] = {0};
+    openapi_write_quoted(w, "/openapi.json");
+    openapi_write_text(w, ":{\"get\":{\"operationId\":\"gg.openapi\",\"responses\":{\"200\":{" "\"description\":\"OpenAPI document\",\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\"}}}}");
+    openapi_write_error_responses(w);
+    openapi_write_text(w, "}}");
+    for (int i = 0; i < ctx->route_count; i++)
+    {
+        if (strcmp(ctx->routes[i].url, "/openapi.json") == 0)
+        {
+            emitted[i] = 1;
+            openapi_write_text(w, ",");
+            openapi_write_quoted(w, openapi_method_name(ctx->routes[i].method));
+            openapi_write_text(w, ":");
+            openapi_write_operation(w, ctx, &ctx->routes[i]);
+        }
+    }
+    openapi_write_text(w, "}");
+    for (int i = 0; i < ctx->route_count; i++)
+    {
+        if (emitted[i] != 0) { continue; }
+        openapi_write_text(w, ",");
+        openapi_write_quoted(w, ctx->routes[i].url);
+        openapi_write_text(w, ":{");
+        int methods = 0;
+        for (int j = i; j < ctx->route_count; j++)
+        {
+            if (strcmp(ctx->routes[i].url, ctx->routes[j].url) != 0) { continue; }
+            emitted[j] = 1;
+            if (methods != 0) { openapi_write_text(w, ","); }
+            methods++;
+            openapi_write_quoted(w, openapi_method_name(ctx->routes[j].method));
+            openapi_write_text(w, ":");
+            openapi_write_operation(w, ctx, &ctx->routes[j]);
+        }
+        openapi_write_text(w, "}");
+    }
+    openapi_write_text(w, "},\"components\":{\"securitySchemes\":{\"BearerAuth\":{\"type\":\"http\",\"scheme\":\"bearer\"}},\"responses\":{\"GargantuaError\":{\"description\":\"Request failed\"," "\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\",\"required\":[\"status\",\"code\",\"error\",\"fields\",\"truncated\"]," "\"properties\":{\"status\":{\"type\":\"integer\"},\"code\":{\"type\":\"string\"},\"error\":{\"type\":\"string\"},\"truncated\":{\"type\":\"boolean\"},\"fields\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"object\",\"required\":[\"field\",\"code\",\"message\"],\"properties\":{\"field\":{\"type\":\"string\"},\"code\":{\"type\":\"string\"},\"message\":{\"type\":\"string\"}}}}}}}}}},\"schemas\":{");
+    for (int i = 0; i < ctx->type_count; i++)
+    {
+        if (i != 0) { openapi_write_text(w, ","); }
+        openapi_write_quoted(w, ctx->types[i].name);
+        openapi_write_text(w, ":");
+        openapi_write_type_schema(w, ctx, &ctx->types[i], 0, 0u);
+    }
+    openapi_write_text(w, "}}}");
+}
+
+int generator_write_openapi(FILE *out, const Generator *ctx)
+{
+    if ((out == NULL) || (ctx == NULL) || (openapi_input_valid(ctx) == 0)) { return -1; }
+    FILE *document = tmpfile();
+    if (document == NULL) { return -1; }
+    OpenApiWriter writer = {document, 0u, 0};
+    openapi_write_document(&writer, ctx);
+    int failed = writer.failed;
+    if ((fflush(document) != 0) || (fseek(document, 0L, SEEK_SET) != 0)) { failed = 1; }
+    if (failed == 0)
+    {
+        if (fputs("static const unsigned char openapi_write[] = {\n", out) == EOF) { failed = 1; }
+        for (size_t i = 0u; (i < writer.size) && (failed == 0); i++)
+        {
+            int byte = fgetc(document);
+            if ((byte == EOF) || (fprintf(out, "%d,%s", byte, ((i + 1u) % 24u == 0u) ? "\n" : "") < 0)) { failed = 1; }
+        }
+        if (fputs("0\n};\n\n" "static int wrap_openapi(const RequestParams *params, char *body, size_t len, char *out, size_t cap)\n" "{\n" "    (void)params;\n    (void)body;\n    (void)len;\n" "    if ((out == NULL) || (cap < sizeof(openapi_write)))\n" "    {\n        if ((out != NULL) && (cap > 0u)) { out[0] = '\\0'; }\n        return -1;\n    }\n" "    memcpy(out, openapi_write, sizeof(openapi_write));\n" "    return 0;\n}\n\n", out) == EOF) { failed = 1; }
+    }
+    if (fclose(document) != 0) { failed = 1; }
+    if ((fflush(out) != 0) || (ferror(out) != 0)) { failed = 1; }
+    return (failed != 0) ? -1 : 0;
+}
