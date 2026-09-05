@@ -1,0 +1,258 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd -- "$SCRIPT_DIR"
+
+APP=${APP:-app}
+OUT=${OUT:-.build}
+CC_BIN=${CC:-cc}
+ACTION=${1:-run}
+
+if (($# > 1)) || [[ "$ACTION" != run && "$ACTION" != build && "$ACTION" != clean ]]; then
+    echo "usage: ./eat [run|build|clean]" >&2
+    exit 2
+fi
+
+case "/$OUT/" in
+    "//"|"/./"|"/../"|*"/../"*|*"/./"*|*"//"*)
+        echo "unsafe OUT '$OUT': a relative build directory is required" >&2
+        exit 2
+        ;;
+esac
+if [[ "$OUT" == /* || "$OUT" == *$'\n'* || "$OUT" == *$'\r'* ]]; then
+    echo "unsafe OUT '$OUT': a relative build directory is required" >&2
+    exit 2
+fi
+
+if [[ "$APP" == *'"'* || "$APP" == *'\\'* ||
+      "$APP" == *$'\n'* || "$APP" == *$'\r'* ]]; then
+    echo "unsafe APP path" >&2
+    exit 2
+fi
+
+if [[ "$ACTION" == clean ]]; then
+    rm -rf -- "$OUT"
+    rm -f -- gargantua
+    echo "cleaned only: $OUT and gargantua"
+    exit 0
+fi
+
+WARN=(
+    -Wall -Wextra -Wpedantic -Werror -Wcast-align -Wcast-qual
+    -Wconversion -Wdouble-promotion -Wformat=2 -Wformat-security
+    -Wnested-externs -Wnull-dereference -Wold-style-definition
+    -Wpointer-arith -Wredundant-decls -Wshadow -Wsign-conversion
+    -Wstrict-prototypes -Wundef -Wwrite-strings -Wvla -Walloca
+    -Wno-dollar-in-identifier-extension
+)
+CFLAGS=(
+    -std=c11 -O2 -pthread -Iinclude -I. "${WARN[@]}"
+    -D_FORTIFY_SOURCE=2 -fstack-protector-all
+    -ftrivial-auto-var-init=zero -ffunction-sections -fdata-sections
+)
+
+RUNTIME=()
+while IFS= read -r f; do RUNTIME+=("$f"); done \
+    < <(find src -name '*.c' ! -path 'src/generator/*' | sort)
+TOOLSRC=()
+while IFS= read -r f; do TOOLSRC+=("$f"); done \
+    < <(find src/generator -name '*.c' | sort)
+HEADERS=()
+while IFS= read -r f; do HEADERS+=("$f"); done \
+    < <(find include -name '*.h' | sort)
+TOOL_DEPS=("${TOOLSRC[@]}" "${HEADERS[@]}")
+
+mkdir -p -- "$OUT"
+
+REBUILD_TOOL=0
+if [[ ! -x gargantua ]]; then
+    REBUILD_TOOL=1
+else
+    for source in "${TOOL_DEPS[@]}"; do
+        if [[ "$source" -nt gargantua ]]; then REBUILD_TOOL=1; break; fi
+    done
+fi
+if ((REBUILD_TOOL != 0)); then
+    echo "  building the generator"
+    "$CC_BIN" "${CFLAGS[@]}" -Wmissing-prototypes \
+        "${TOOLSRC[@]}" -o gargantua
+fi
+
+if [[ ! -d "$APP" ]]; then
+    echo "no '$APP' directory. Put your .c files there." >&2
+    exit 1
+fi
+SRC=()
+while IFS= read -r -d '' source; do
+    SRC+=("$source")
+done < <(find "$APP" -type f -name '*.c' ! -name '*.gen.c' -print0)
+if ((${#SRC[@]} == 0)); then
+    echo "no .c files in '$APP'." >&2
+    exit 1
+fi
+echo "  reading ${#SRC[@]} file(s) from $APP/"
+
+PROPS="$APP/application.properties"
+DRIVER=sqlite
+if [[ -f "$PROPS" ]]; then
+    VALUE=$(sed -n 's/^[[:space:]]*database\.driver[[:space:]]*=[[:space:]]*//p' "$PROPS" \
+        | sed 's/[[:space:]]*#.*//; s/[[:space:]]*$//' | tail -1)
+    if [[ -n "$VALUE" ]]; then DRIVER=$VALUE; fi
+fi
+if [[ -n "${DATABASE_DRIVER:-}" ]]; then DRIVER=$DATABASE_DRIVER; fi
+
+if [[ "$DRIVER" != sqlite ]]; then
+    echo "only SQLite is supported: remove database.driver or set it to sqlite" >&2
+    exit 2
+fi
+
+prop() {
+    [[ -f "$PROPS" ]] || return 0
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$PROPS" \
+        | sed 's/[[:space:]]*#.*//; s/[[:space:]]*$//' | tail -1
+}
+
+TLS_FLAGS=()
+TLS_MODE=$(prop 'fetch\.tls')
+if [[ -z "$TLS_MODE" ]]; then TLS_MODE=auto; fi
+case "$TLS_MODE" in
+    off) ;;
+    auto|on)
+        if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl; then
+            read -r -a TLS_CFLAGS <<< "$(pkg-config --cflags --libs openssl)"
+            TLS_FLAGS=(-DGARGANTUA_TLS "${TLS_CFLAGS[@]}")
+        elif [[ "$TLS_MODE" == on ]]; then
+            echo "fetch.tls=on but OpenSSL was not found via pkg-config" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "fetch.tls accepts auto, on or off" >&2
+        exit 1
+        ;;
+esac
+
+DEP_LIBS=()
+LIB_NAMES=()
+LIB_VALUE=$(prop 'deps\.libs')
+if [[ -n "$LIB_VALUE" ]]; then
+    read -r -a LIB_NAMES <<< "$LIB_VALUE"
+    for lib in "${LIB_NAMES[@]}"; do
+        if ((${#lib} > 128)) || [[ ! "$lib" =~ ^[A-Za-z0-9][A-Za-z0-9_.+-]*$ ]]; then
+            echo "unsafe deps.libs '$lib'" >&2
+            exit 1
+        fi
+        DEP_LIBS+=("-l$lib")
+    done
+fi
+
+safe_dep_path() {
+    local path=$1
+    if [[ -z "$path" || ${#path} -gt 512 ||
+          ! "$path" =~ ^[A-Za-z0-9_./+@%:=,-]+$ ]]; then
+        return 1
+    fi
+    case "$path" in
+        .|..|./*|../*|*/./*|*/../*|*/.|*/..|*//*) return 1 ;;
+    esac
+    return 0
+}
+
+LIB_DIRS=()
+LIBPATH_VALUE=$(prop 'deps\.libpath')
+if [[ -n "$LIBPATH_VALUE" ]]; then
+    read -r -a LIB_DIRS <<< "$LIBPATH_VALUE"
+    for dir in "${LIB_DIRS[@]}"; do
+        if ! safe_dep_path "$dir"; then
+            echo "unsafe deps.libpath '$dir'" >&2
+            exit 1
+        fi
+        DEP_LIBS+=("-L$dir")
+    done
+fi
+
+INCLUDE_DIRS=()
+INCLUDE_VALUE=$(prop 'deps\.include')
+if [[ -n "$INCLUDE_VALUE" ]]; then
+    read -r -a INCLUDE_DIRS <<< "$INCLUDE_VALUE"
+    for dir in "${INCLUDE_DIRS[@]}"; do
+        if ! safe_dep_path "$dir"; then
+            echo "unsafe deps.include '$dir'" >&2
+            exit 1
+        fi
+        CFLAGS+=("-I$dir")
+    done
+fi
+
+PKG_NAMES=()
+PKG_VALUE=$(prop 'deps\.packages')
+if [[ -n "$PKG_VALUE" ]]; then
+    read -r -a PKG_NAMES <<< "$PKG_VALUE"
+    for package in "${PKG_NAMES[@]}"; do
+        if ((${#package} > 128)) ||
+           [[ ! "$package" =~ ^[A-Za-z0-9][A-Za-z0-9_.+-]*$ ]]; then
+            echo "unsafe deps.packages '$package'" >&2
+            exit 1
+        fi
+    done
+    if ! command -v pkg-config > /dev/null 2>&1; then
+        echo "deps.packages needs pkg-config, which was not found" >&2
+        exit 1
+    fi
+    if ! pkg-config --exists "${PKG_NAMES[@]}"; then
+        echo "missing packages: ${PKG_NAMES[*]}" >&2
+        exit 1
+    fi
+    PKG_CFLAGS_VALUE=$(pkg-config --cflags "${PKG_NAMES[@]}")
+    PKG_LIBS_VALUE=$(pkg-config --libs "${PKG_NAMES[@]}")
+    PKG_CFLAGS=()
+    PKG_LIBS=()
+    if [[ -n "$PKG_CFLAGS_VALUE" ]]; then
+        read -r -a PKG_CFLAGS <<< "$PKG_CFLAGS_VALUE"
+        CFLAGS+=("${PKG_CFLAGS[@]}")
+    fi
+    if [[ -n "$PKG_LIBS_VALUE" ]]; then
+        read -r -a PKG_LIBS <<< "$PKG_LIBS_VALUE"
+        DEP_LIBS+=("${PKG_LIBS[@]}")
+    fi
+fi
+
+VENDOR=()
+if [[ -d vendor ]]; then
+    while IFS= read -r -d '' f; do
+        [[ -n "$f" ]] && VENDOR+=("$f")
+    done < <(find vendor -type f -name '*.c' -print0)
+fi
+
+if ((${#VENDOR[@]} > 0)); then
+    echo "  vendor: ${#VENDOR[@]} file(s)"
+fi
+if ((${#DEP_LIBS[@]} > 0)); then
+    echo "  dependencies: ${DEP_LIBS[*]}"
+fi
+
+./gargantua "${SRC[@]}" -o "$OUT/app.gen.c" -m
+CFLAGS+=("-DCONFIG_FILE=\"$PROPS\"")
+
+LINK=(-lsqlite3)
+((${#DEP_LIBS[@]} > 0)) && LINK+=("${DEP_LIBS[@]}")
+
+BUILD_SOURCES=("$OUT/app.gen.c" "${RUNTIME[@]}")
+if ((${#VENDOR[@]} > 0)); then
+    BUILD_SOURCES+=("${VENDOR[@]}")
+fi
+
+"$CC_BIN" "${CFLAGS[@]}" "${TLS_FLAGS[@]}" "${BUILD_SOURCES[@]}" \
+    -o "$OUT/server" "${LINK[@]}"
+
+if ((${#TLS_FLAGS[@]} > 0)); then
+    echo "  ready: $OUT/server  (fetch: http + https)"
+else
+    echo "  ready: $OUT/server  (fetch: http only)"
+fi
+
+if [[ "$ACTION" == build ]]; then exit 0; fi
+
+echo
+exec "$OUT/server"
