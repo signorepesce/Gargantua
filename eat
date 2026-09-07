@@ -156,14 +156,19 @@ prop() {
 }
 
 TLS_FLAGS=()
+TLS_LIBS=()
 TLS_MODE=$(prop 'fetch\.tls')
 if [[ -z "$TLS_MODE" ]]; then TLS_MODE=auto; fi
 case "$TLS_MODE" in
     off) ;;
     auto|on)
         if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl; then
-            read -r -a TLS_CFLAGS <<< "$(pkg-config --cflags --libs openssl)"
-            TLS_FLAGS=(-DGARGANTUA_TLS "${TLS_CFLAGS[@]}")
+            # Compiler flags go before the sources, libraries after them: GNU ld
+            # only keeps a library if something already needs it.
+            read -r -a TLS_CFLAGS <<< "$(pkg-config --cflags openssl)"
+            read -r -a TLS_LDLIBS <<< "$(pkg-config --libs openssl)"
+            TLS_FLAGS=(-DGARGANTUA_TLS ${TLS_CFLAGS[@]+"${TLS_CFLAGS[@]}"})
+            TLS_LIBS=(${TLS_LDLIBS[@]+"${TLS_LDLIBS[@]}"})
         elif [[ "$TLS_MODE" == on ]]; then
             echo "fetch.tls=on but OpenSSL was not found via pkg-config" >&2
             exit 1
@@ -282,6 +287,7 @@ if [[ -n "${EXTRA_LDFLAGS:-}" ]]; then
     read -r -a EXTRA_L <<< "$EXTRA_LDFLAGS"
     LINK+=("${EXTRA_L[@]}")
 fi
+((${#TLS_LIBS[@]} > 0)) && LINK+=("${TLS_LIBS[@]}")
 ((${#DEP_LIBS[@]} > 0)) && LINK+=("${DEP_LIBS[@]}")
 
 BUILD_SOURCES=("$OUT/app.gen.c" "${RUNTIME[@]}")
