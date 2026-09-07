@@ -1,4 +1,8 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "server.h"
+#include "dynbuf.h"
 #include "arena.h"
 #include "http.h"
 #include "config.h"
@@ -48,8 +52,7 @@ typedef struct
 {
     uint32_t      ip;
     Arena       arena;
-    unsigned char backing[SERVER_ARENA];
-    char          req[SERVER_REQ_MAX];
+    DynBuf        req;
 } Worker;
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal stop must be lock free");
 typedef struct
@@ -102,10 +105,9 @@ static int handle_expect_continue(int sock, const HttpRequest *req, HttpParseRes
     return 0;
 }
 
-int read_request(int sock, char *buf, size_t cap, size_t *len, HttpRequest *req)
+int read_request(int sock, DynBuf *buf, HttpRequest *req)
 {
     assert(buf != NULL);
-    assert(len != NULL);
     assert(req != NULL);
 
     HttpParseResult pr = HTTP_PARSE_NEED_MORE;
@@ -118,9 +120,9 @@ int read_request(int sock, char *buf, size_t cap, size_t *len, HttpRequest *req)
     {
         guard++;
 
-        if (*len > 0u)
+        if (buf->len > 0u)
         {
-            pr = http_parse_request(buf, *len, req);
+            pr = http_parse_request(buf->data, buf->len, req);
             if (pr == HTTP_PARSE_ERROR) { return -1; }
             if ((req->header_len > 0u) && (req->content_length >= 0) && ((unsigned long)req->content_length > (unsigned long)SERVER_BODY_MAX)) { return -2; }
             int expect_rc = handle_expect_continue(sock, req, pr, &sent_continue);
@@ -132,16 +134,16 @@ int read_request(int sock, char *buf, size_t cap, size_t *len, HttpRequest *req)
             }
         }
 
-        if (*len + 1u >= cap) { return -2; }
+        if (dynbuf_reserve(buf, buf->len + (size_t)DYNBUF_MIN_CHUNK + 1u) != 0) { return (buf->truncated != 0) ? -2 : -1; }
 
         if (set_timeout_until(sock, SO_RCVTIMEO, &deadline) != 0) { return -1; }
-        ssize_t got = recv(sock, buf + *len, cap - *len - 1u, 0);
-        if (got == 0) { return (*len == 0u) ? 0 : -1; }
+        ssize_t got = recv(sock, buf->data + buf->len, buf->cap - buf->len - 1u, 0);
+        if (got == 0) { return (buf->len == 0u) ? 0 : -1; }
         if ((got < 0) && (errno == EINTR)) { continue; }
         if (got < 0) { return -1; }
 
-        *len += (size_t)got;
-        buf[*len] = '\0';
+        buf->len += (size_t)got;
+        buf->data[buf->len] = '\0';
     }
 
     return -1;

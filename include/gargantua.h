@@ -10,17 +10,17 @@ typedef const char *str;
 
 #define $table(T) typedef struct T T; struct T
 #define $json(T)  typedef struct T T; struct T
-#define $References(T)
+#define $references(T)
 #define $list(T) RowList
 #define $page(T) RowList
 
-#define $Id
-#define $NotNull
-#define $Min(value)
-#define $Max(value)
-#define $Size(min, max)
-#define $Email
-#define $Unique
+#define $id
+#define $not_null
+#define $min(value)
+#define $max(value)
+#define $size(min, max)
+#define $email
+#define $unique
 
 #define $transactional
 

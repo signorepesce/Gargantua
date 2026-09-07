@@ -1,4 +1,8 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "server.h"
+#include "dynbuf.h"
 #include "arena.h"
 #include "http.h"
 #include "config.h"
@@ -48,8 +52,7 @@ typedef struct
 {
     uint32_t      ip;
     Arena       arena;
-    unsigned char backing[SERVER_ARENA];
-    char          req[SERVER_REQ_MAX];
+    DynBuf        req;
 } Worker;
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal stop must be lock free");
 typedef struct
@@ -67,8 +70,6 @@ static void handle_connection(Worker *w, int sock)
     assert(w != NULL);
     assert(sock >= 0);
 
-    size_t len = 0u;
-
     for (int served = 0; served < SERVER_KEEPALIVE_MAX; served++)
     {
         if (g_drain_over != 0) { return; }
@@ -76,9 +77,9 @@ static void handle_connection(Worker *w, int sock)
         HttpRequest req = {0};
         reset_response_state();
 
-        int rc = read_request(sock, w->req, sizeof(w->req), &len, &req);
+        int rc = read_request(sock, &w->req, &req);
         response_head = (strcmp(req.method, "HEAD") == 0) ||
-                        ((len >= 5u) && (memcmp(w->req, "HEAD ", 5u) == 0));
+                        ((w->req.len >= 5u) && (memcmp(w->req.data, "HEAD ", 5u) == 0));
         if (rc != 1)
         {
             send_read_error(sock, rc);
@@ -116,7 +117,7 @@ static void handle_connection(Worker *w, int sock)
         finish_request(w);
 
         if ((cont != 0) || (g_drain_over != 0)) { return; }
-        if (consume_message(w, &req, &len) != 0) { return; }
+        if (consume_message(w, &req) != 0) { return; }
     }
 }
 
@@ -124,7 +125,7 @@ static void *worker_main(void *arg)
 {
     Worker *w = arg;
     assert(w != NULL);
-    assert(w->arena.base != NULL);
+    assert(w->arena.max != 0u);
 
     for (;;)
     {
@@ -135,6 +136,7 @@ static void *worker_main(void *arg)
         (void)close(fd);
         (void)client_limit(w->ip, -1);
         (void)arena_reset(&w->arena);
+        dynbuf_release(&w->req);
     }
 
     return NULL;
@@ -171,7 +173,8 @@ static int start_workers(void)
 
     for (int i = 0; i < g_worker_count; i++)
     {
-        if (arena_init(&g_workers[i].arena, g_workers[i].backing, (size_t)SERVER_ARENA) != 0)
+        if (dynbuf_init(&g_workers[i].req, (size_t)SERVER_REQ_MAX) != 0) { return -1; }
+        if (arena_init(&g_workers[i].arena, (size_t)SERVER_ARENA) != 0)
         {
             (void)fprintf(stderr, "gargantua: the arena was not initialised\n");
             stop_workers();
@@ -181,7 +184,12 @@ static int start_workers(void)
 
     for (int i = 0; i < g_worker_count; i++)
     {
-        if (pthread_create(&g_worker_threads[i], NULL, worker_main, &g_workers[i]) != 0)
+        pthread_attr_t attr;
+        if (pthread_attr_init(&attr) != 0) { return -1; }
+        (void)pthread_attr_setstacksize(&attr, (size_t)SERVER_STACK);
+        int made = pthread_create(&g_worker_threads[i], &attr, worker_main, &g_workers[i]);
+        (void)pthread_attr_destroy(&attr);
+        if (made != 0)
         {
             (void)fprintf(stderr, "gargantua: the thread did not start\n");
             stop_workers();

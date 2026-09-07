@@ -1,3 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "generator.h"
 #include <assert.h>
 #include <ctype.h>
@@ -240,7 +243,6 @@ void emit_task_table(FILE *out, const Generator *ctx)
     }
 
     (void)fprintf(out, "\n");
-    for (int i = 0; (i < ctx->task_count) && (i < SCHEDULER_MAX_TASKS); i++) { (void)fprintf(out, "void %s(void);\n", ctx->tasks[i].function_name); }
 
     (void)fprintf(out, "\nstatic const Task TASKS[] =\n{\n");
     for (int i = 0; (i < ctx->task_count) && (i < SCHEDULER_MAX_TASKS); i++)

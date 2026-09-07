@@ -1,3 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "generator.h"
 #include <assert.h>
 #include <ctype.h>
@@ -107,9 +110,9 @@ unsigned field_flag_from_word(const char *word)
     assert(word != NULL);
     if (strlen(word) >= GENERATOR_MAX_NAME) { return 0; }
 
-    if (word_equals(word, "$Id") == 1) { return 1u; }
-    if (word_equals(word, "$NotNull") == 1) { return 2u; }
-    if (word_equals(word, "$Unique") == 1) { return 4u; }
+    if (word_equals(word, "$id") == 1) { return 1u; }
+    if (word_equals(word, "$not_null") == 1) { return 2u; }
+    if (word_equals(word, "$unique") == 1) { return 4u; }
     return 0u;
 }
 

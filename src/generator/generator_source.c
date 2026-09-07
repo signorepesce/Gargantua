@@ -1,3 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "generator.h"
 #include "parse_internal.h"
 #include "store.h"
@@ -81,10 +84,10 @@ static int rule_annotation(Generator *ctx, ParseState *st, const char *line)
 {
     unsigned flag = 0u;
     const char *args = NULL;
-    if (strncmp(line, "$Min(", 5u) == 0) { flag = 1u; args = line + 5; }
-    else if (strncmp(line, "$Max(", 5u) == 0) { flag = 2u; args = line + 5; }
-    else if (strncmp(line, "$Size(", 6u) == 0) { flag = 4u; args = line + 6; }
-    else if (strcmp(line, "$Email") == 0) { flag = 8u; }
+    if (strncmp(line, "$min(", 5u) == 0) { flag = 1u; args = line + 5; }
+    else if (strncmp(line, "$max(", 5u) == 0) { flag = 2u; args = line + 5; }
+    else if (strncmp(line, "$size(", 6u) == 0) { flag = 4u; args = line + 6; }
+    else if (strcmp(line, "$email") == 0) { flag = 8u; }
     else { return 0; }
     int invalid = (st->rules.validation & flag) != 0u;
     if (args != NULL)
@@ -132,12 +135,12 @@ static int parse_references_annotation(Generator *ctx, ParseState *st, char *lin
     assert(ctx != NULL);
     assert(st != NULL);
 
-    if (strncmp(line, "$References(", 12u) != 0) { return 0; }
+    if (strncmp(line, "$references(", 12u) != 0) { return 0; }
 
     size_t n = strlen(line);
     if ((n < 14u) || (line[n - 1u] != ')') || ((n - 13u) >= GENERATOR_MAX_NAME) || (st->pending_references[0] != '\0'))
     {
-        generator_error(ctx, st->lineno, "use one $References(Table) before an int field");
+        generator_error(ctx, st->lineno, "use one $references(Table) before an int field");
         return 1;
     }
 
@@ -224,7 +227,7 @@ static int field_conflicts(Generator *ctx, ParseState *st, const ParsedField *f)
 
     if (((f->flags & 1u) != 0u) && (strcmp(f->c_type, "int") != 0))
     {
-        generator_error(ctx, st->lineno, "$Id must be int for a safe auto-id");
+        generator_error(ctx, st->lineno, "$id must be int for a safe auto-id");
         return 1;
     }
 
@@ -239,7 +242,7 @@ static int field_conflicts(Generator *ctx, ParseState *st, const ParsedField *f)
         }
         if (((prev->flags & 1u) != 0u) && ((f->flags & 1u) != 0u))
         {
-            generator_error(ctx, st->lineno, "only one $Id per table is allowed");
+            generator_error(ctx, st->lineno, "only one $id per table is allowed");
             return 1;
         }
     }

@@ -1,4 +1,8 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "server.h"
+#include "dynbuf.h"
 #include "arena.h"
 #include "http.h"
 #include "config.h"
@@ -48,8 +52,7 @@ typedef struct
 {
     uint32_t      ip;
     Arena       arena;
-    unsigned char backing[SERVER_ARENA];
-    char          req[SERVER_REQ_MAX];
+    DynBuf        req;
 } Worker;
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal stop must be lock free");
 typedef struct
@@ -161,16 +164,23 @@ static const Route *resolve_route(const HttpRequest *req, const char *path, Requ
     return route;
 }
 
-static char *prepare_handler(Worker *w, const HttpRequest *req)
+static char *prepare_handler(Worker *w, const HttpRequest *req, size_t *cap_out)
 {
     assert(w != NULL);
     assert(req != NULL);
+    assert(cap_out != NULL);
 
     request_bind(req);
     arena_bind(&w->arena);
 
-    char *body = arena_alloc(&w->arena, (size_t)SERVER_BODY_MAX);
+    size_t blen = (req->content_length > 0) ? (size_t)req->content_length : req->body_len;
+    size_t want = (size_t)SERVER_RESP_MIN;
+    if (blen > want) { want = blen + (size_t)SERVER_RESP_MIN; }
+    if (want > (size_t)SERVER_BODY_MAX) { want = (size_t)SERVER_BODY_MAX; }
+
+    char *body = arena_alloc(&w->arena, want);
     if (body != NULL) { request_fail_reset(); }
+    *cap_out = want;
 
     return body;
 }
@@ -208,7 +218,8 @@ int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char 
         return send_response(sock, 400, JSON_CONTENT_TYPE, "bad query", keep_alive);
     }
 
-    char *body = prepare_handler(w, req);
+    size_t body_cap = 0u;
+    char *body = prepare_handler(w, req, &body_cap);
     if (body == NULL)
     {
         *status_out = 503;
@@ -222,7 +233,7 @@ int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char 
     }
 
     assert(route->handler != NULL);
-    int rc = dispatch_route(route->handler, &params, body_in, body_len, body, (size_t)SERVER_BODY_MAX);
+    int rc = dispatch_route(route->handler, &params, body_in, body_len, body, body_cap);
 
     if ((request_failed() == 1) || (rc != 0)) { return serve_handler_error(sock, rc, keep_alive, status_out); }
 
@@ -313,19 +324,15 @@ void finish_request(Worker *w)
     if (arena_reset(&w->arena) != 0) { (void)fprintf(stderr, "gargantua: out-of-bounds write!\n"); }
 }
 
-int consume_message(Worker *w, const HttpRequest *req, size_t *len)
+int consume_message(Worker *w, const HttpRequest *req)
 {
     assert(w != NULL);
     assert(req != NULL);
-    assert(len != NULL);
 
-    if (req->message_len > *len) { return -1; }
+    if (req->message_len > w->req.len) { return -1; }
 
-    size_t left = *len - req->message_len;
-    if (left > 0u) { memmove(w->req, w->req + req->message_len, left); }
-
-    *len = left;
-    w->req[*len] = '\0';
+    dynbuf_consume(&w->req, req->message_len);
+    if (w->req.data != NULL) { w->req.data[w->req.len] = '\0'; }
 
     return 0;
 }

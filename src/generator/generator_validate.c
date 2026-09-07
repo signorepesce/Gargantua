@@ -1,3 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "generator.h"
 #include "parse_internal.h"
 #include "store.h"
@@ -75,7 +78,7 @@ static void validate_nested_field(Generator *ctx, ParsedType *t, int type_slot, 
 
     if ((target < 0) || (t->json_only == 0) || ((f->flags & ~2u) != 0u))
     {
-        generator_error(ctx, t->line, "nested field %s.%s needs a declared type inside $json;" " only $NotNull is allowed", t->name, f->name);
+        generator_error(ctx, t->line, "nested field %s.%s needs a declared type inside $json;" " only $not_null is allowed", t->name, f->name);
         return;
     }
 
@@ -101,7 +104,7 @@ static void validate_reference_field(Generator *ctx, const ParsedType *t, Parsed
 
     if ((t->json_only != 0) || (strcmp(f->c_type, "int") != 0) || (target < 0) || (key < 0) || (ctx->types[target].json_only != 0))
     {
-        generator_error(ctx, t->line, "$References requires an int field and a table with $Id");
+        generator_error(ctx, t->line, "$references requires an int field and a table with $id");
         return;
     }
 
@@ -122,7 +125,7 @@ static void validate_type_fields(Generator *ctx)
 
             if (strcmp(f->kind, "FIELD_OBJECT") == 0) { validate_nested_field(ctx, t, i, f); }
             if (f->references[0] != '\0') { validate_reference_field(ctx, t, f); }
-            if ((t->json_only != 0) && ((f->flags & 5u) != 0u)) { generator_error(ctx, t->line, "$Id/$Unique belong on $table fields"); }
+            if ((t->json_only != 0) && ((f->flags & 5u) != 0u)) { generator_error(ctx, t->line, "$id/$unique belong on $table fields"); }
         }
     }
 }
@@ -171,7 +174,13 @@ static void select_file_path(Generator *ctx, int file_index)
 {
     assert(ctx != NULL);
 
-    if ((file_index >= 0) && (file_index < ctx->file_count)) { (void)snprintf(ctx->path, sizeof(ctx->path), "%s", ctx->files[file_index].path); }
+    if ((file_index < 0) || (file_index >= ctx->file_count)) { return; }
+
+    const char *src = ctx->files[file_index].path;
+    size_t n = 0u;
+    while ((n < (sizeof(ctx->path) - 1u)) && (src[n] != '\0')) { n++; }
+    memmove(ctx->path, src, n);
+    ctx->path[n] = '\0';
 }
 
 static void validate_route_types(Generator *ctx, const ParsedRoute *route)

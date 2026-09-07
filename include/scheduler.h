@@ -2,6 +2,7 @@
 #define SCHEDULER_H
 
 #define SCHEDULER_MAX_TASKS 16
+#define SCHEDULER_STACK     (256 * 1024)
 #define SCHEDULER_ARENA     (256 * 1024)
 
 typedef void (*TaskBody)(void);

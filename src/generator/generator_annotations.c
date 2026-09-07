@@ -1,3 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "generator.h"
 #include "parse_internal.h"
 #include "store.h"
@@ -173,7 +176,13 @@ int parse_produces_annotation(Generator *ctx, ParseState *st, const char *line)
         return 1;
     }
 
-    (void)snprintf(st->pending_produces, sizeof(st->pending_produces), "%s", value);
+    size_t value_len = strlen(value);
+    if (value_len >= sizeof(st->pending_produces))
+    {
+        generator_error(ctx, st->lineno, "content type is longer than %d characters", (int)sizeof(st->pending_produces) - 1);
+        return 1;
+    }
+    memcpy(st->pending_produces, value, value_len + 1u);
 
     return 1;
 }
@@ -290,7 +299,8 @@ int parse_auth_annotation(Generator *ctx, ParseState *st, const char *line)
         return 1;
     }
 
-    (void)snprintf(st->pending_role, sizeof(st->pending_role), "%s", role);
+    if (strcmp(role, "admin") == 0) { memcpy(st->pending_role, "admin", 6u); }
+    else { memcpy(st->pending_role, "user", 5u); }
 
     return 1;
 }

@@ -1,4 +1,8 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "server.h"
+#include "dynbuf.h"
 #include "arena.h"
 #include "http.h"
 #include "config.h"
@@ -48,8 +52,7 @@ typedef struct
 {
     uint32_t      ip;
     Arena       arena;
-    unsigned char backing[SERVER_ARENA];
-    char          req[SERVER_REQ_MAX];
+    DynBuf        req;
 } Worker;
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal stop must be lock free");
 typedef struct

@@ -6,3 +6,7 @@
 *.db
 *.dSYM/
 .DS_Store
+
+/data/
+.deploy-stamp
+/.idea/

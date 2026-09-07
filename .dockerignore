@@ -1,0 +1,13 @@
+.git
+.gitignore
+.build
+gargantua
+*.db
+*.o
+*.gen.c
+*.gen.h
+README.md
+resources
+Dockerfile
+.dockerignore
+deploy.sh

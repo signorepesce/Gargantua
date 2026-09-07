@@ -1,4 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "gargantua.h"
 #include "json.h"
 #include "http.h"
@@ -161,7 +163,7 @@ static _Thread_local Arena *g_arena;
 void *request_alloc(size_t size)
 {
     void *memory = NULL;
-    if ((g_arena != NULL) && (g_arena->base != NULL) && (size > 0u)) { memory = arena_alloc(g_arena, size); }
+    if ((g_arena != NULL) && (g_arena->max != 0u) && (size > 0u)) { memory = arena_alloc(g_arena, size); }
     if (memory == NULL) { request_fail(500, "request allocation failed"); }
     return memory;
 }
@@ -402,7 +404,7 @@ int dispatch_route(DispatchFn handler, const RequestParams *params, char *body, 
     if (handler == NULL || g_escape != NULL || out == NULL || cap == 0u) { return -1; }
     sigjmp_buf escape;
     g_escape = &escape;
-    int rc = 0;
+    volatile int rc = 0;
     if (sigsetjmp(escape, 0) == 0) { rc = handler(params, body, len, out, cap); }
     g_escape = NULL;
     if (db_depth() > 0)

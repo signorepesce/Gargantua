@@ -3,7 +3,7 @@
 
 int client_limit(uint32_t ip, int action);
 
-int consume_message(Worker *w, const HttpRequest *req, size_t *len);
+int consume_message(Worker *w, const HttpRequest *req);
 
 void cors_prepare(const HttpRequest *req);
 
@@ -19,7 +19,7 @@ void log_request(const struct timeval *start, const char *method, const char *pa
 
 int queue_pop(uint32_t *ip);
 
-int read_request(int sock, char *buf, size_t cap, size_t *len, HttpRequest *req);
+int read_request(int sock, DynBuf *buf, HttpRequest *req);
 
 void reset_response_state(void);
 

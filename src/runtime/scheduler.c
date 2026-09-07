@@ -1,3 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "scheduler.h"
 #include "arena.h"
 #include "db.h"
@@ -13,7 +16,6 @@ typedef struct
 {
     const Task *task;
     Arena arena;
-    unsigned char backing[SCHEDULER_ARENA];
 } TaskRunner;
 
 static TaskRunner task_runners[SCHEDULER_MAX_TASKS];
@@ -113,7 +115,7 @@ static int scheduler_prepare(const Task *tasks, int count)
     {
         if ((tasks[i].body == NULL) || (tasks[i].name == NULL) || (tasks[i].interval_ms < 0L) || (tasks[i].interval_ms > 86400000L) || ((tasks[i].interval_ms > 0L) && (tasks[i].interval_ms < 100L))) { return -1; }
         task_runners[i].task = &tasks[i];
-        if (arena_init(&task_runners[i].arena, task_runners[i].backing, sizeof(task_runners[i].backing)) != 0) { return -1; }
+        if (arena_init(&task_runners[i].arena, (size_t)SCHEDULER_ARENA) != 0) { return -1; }
     }
     return 0;
 }
@@ -137,7 +139,12 @@ int scheduler_start(void)
     for (int i = 0; i < count; i++)
     {
         if (tasks[i].interval_ms == 0L) { continue; }
-        if (pthread_create(&task_threads[started_threads], NULL, scheduler_run_repeatedly, &task_runners[i]) != 0)
+        pthread_attr_t attr;
+        if (pthread_attr_init(&attr) != 0) { return -1; }
+        (void)pthread_attr_setstacksize(&attr, (size_t)SCHEDULER_STACK);
+        int made = pthread_create(&task_threads[started_threads], &attr, scheduler_run_repeatedly, &task_runners[i]);
+        (void)pthread_attr_destroy(&attr);
+        if (made != 0)
         {
             scheduler_stop();
             return -1;
