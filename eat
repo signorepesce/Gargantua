@@ -289,7 +289,7 @@ if ((${#VENDOR[@]} > 0)); then
     BUILD_SOURCES+=("${VENDOR[@]}")
 fi
 
-"$CC_BIN" "${CFLAGS[@]}" "${TLS_FLAGS[@]}" "${BUILD_SOURCES[@]}" \
+"$CC_BIN" "${CFLAGS[@]}" ${TLS_FLAGS[@]+"${TLS_FLAGS[@]}"} "${BUILD_SOURCES[@]}" \
     -o "$OUT/server" "${LINK[@]}"
 
 if ((${#TLS_FLAGS[@]} > 0)); then

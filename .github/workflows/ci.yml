@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  linux:
+    name: tests and build (gcc / glibc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sqlite headers
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Unit tests
+        run: ./eat test
+      - name: Build
+        run: ./eat build
+
+  macos:
+    name: tests and build (clang)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: ./eat test
+      - name: Build
+        run: ./eat build
+
+  musl:
+    name: static build (gcc / musl)
+    runs-on: ubuntu-latest
+    container: alpine:3.18
+    steps:
+      - name: Install toolchain
+        run: apk add --no-cache gcc musl-dev bash sqlite-static sqlite-dev tar
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: ./eat test
+      - name: Static build
+        run: |
+          EXTRA_CFLAGS="-static -Os" EXTRA_LDFLAGS="-Wl,--gc-sections -s" ./eat build
+          ls -la .build/server
+
+  postgres:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: gargantua
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install postgres headers
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev curl
+      - name: Write an application that uses the database
+        run: |
+          mkdir -p pgapp
+          cat > pgapp/Note.c <<'C'
+          #include <gargantua.h>
+
+          $table(Note)
+          {
+              $id       int id;
+              $not_null str title;
+              str body;
+          };
+          C
+          cat > pgapp/note_controller.c <<'C'
+          #include <gargantua.h>
+
+          $on_start
+          void note_setup(void)
+          {
+              (void)Note_create_table();
+          }
+
+          $post("/notes")
+          Note note_create(Note body)
+          {
+              body.id = Note_insert(body);
+              return body;
+          }
+
+          $get("/notes/{id}")
+          Note note_show(int id)
+          {
+              return Note_find(id);
+          }
+
+          $get("/notes")
+          $list(Note) note_index(void)
+          {
+              return Note_list(50);
+          }
+          C
+          cat > pgapp/application.properties <<'P'
+          server.port     = 8100
+          server.address  = 127.0.0.1
+          server.workers  = 4
+          database.driver = postgres
+          database.url    = postgresql://postgres:secret@127.0.0.1/gargantua
+          fetch.tls       = off
+          static.root     =
+          templates.root  =
+          P
+      - name: Build against postgres
+        run: APP=pgapp ./eat build
+      - name: Run and exercise the API
+        run: |
+          ./.build/server > server.log 2>&1 &
+          for _ in $(seq 1 20); do
+            curl -sf -m 2 http://127.0.0.1:8100/openapi.json >/dev/null && break
+            sleep 1
+          done
+          head -2 server.log
+          grep -q "database: postgres (connected)" server.log
+
+          code=$(curl -s -o body.json -w '%{http_code}' -X POST \
+                 -H 'Content-Type: application/json' \
+                 -d '{"title":"ci","body":"hello"}' http://127.0.0.1:8100/notes)
+          echo "POST -> $code $(cat body.json)"
+          [ "$code" = "201" ]
+
+          code=$(curl -s -o one.json -w '%{http_code}' http://127.0.0.1:8100/notes/1)
+          echo "GET  -> $code $(cat one.json)"
+          [ "$code" = "200" ]
+
+          code=$(curl -s -o list.json -w '%{http_code}' http://127.0.0.1:8100/notes)
+          echo "LIST -> $code $(cat list.json)"
+          [ "$code" = "200" ]
+
+          code=$(curl -s -o bad.json -w '%{http_code}' -X POST \
+                 -H 'Content-Type: application/json' \
+                 -d '{"body":"no title"}' http://127.0.0.1:8100/notes)
+          echo "VALIDATION -> $code"
+          [ "$code" = "400" ]
+
+  image:
+    name: container image (${{ matrix.driver }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [sqlite, postgres]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the driver
+        run: |
+          if [ "${{ matrix.driver }}" = "postgres" ]; then
+            sed -i 's|^database.url .*|database.url        = postgresql://postgres:secret@db/gargantua|' app/application.properties
+            sed -i '/^database.url/i database.driver     = postgres' app/application.properties
+          fi
+          grep -E '^database\.' app/application.properties
+      - name: Build image
+        run: docker build --build-arg PACK=0 -t gargantua:${{ matrix.driver }} .
+      - name: Report size
+        run: docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' gargantua
