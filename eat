@@ -9,8 +9,9 @@ OUT=${OUT:-.build}
 CC_BIN=${CC:-cc}
 ACTION=${1:-run}
 
-if (($# > 1)) || [[ "$ACTION" != run && "$ACTION" != build && "$ACTION" != clean && "$ACTION" != test ]]; then
-    echo "usage: ./eat [run|build|clean|test]" >&2
+if (($# > 1)) || [[ "$ACTION" != run && "$ACTION" != build && "$ACTION" != clean &&
+                    "$ACTION" != test && "$ACTION" != dev ]]; then
+    echo "usage: ./eat [run|build|clean|test|dev]" >&2
     exit 2
 fi
 
@@ -67,6 +68,9 @@ if [[ "$ACTION" == test ]]; then
             test_dynbuf) deps=(src/core/dynbuf.c) ;;
             test_http)   deps=(src/http/http.c) ;;
             test_json)   deps=(src/http/json.c) ;;
+            test_config) deps=(src/core/config.c) ;;
+            test_response) deps=(src/http/response.c) ;;
+            test_route)  deps=(src/http/route.c) ;;
             *)           deps=() ;;
         esac
         if ! "$CC_BIN" "${CFLAGS[@]}" -Itests "$t" "${deps[@]}" -o "$OUT/$name"; then
@@ -252,6 +256,45 @@ if [[ -n "$PKG_VALUE" ]]; then
     fi
 fi
 
+# Optional features. Absent means everything is on; naming any of them turns
+# the rest off. A feature that is off is neither compiled nor called: the
+# generated main() guards its calls with the matching -D.
+if [[ -f "$PROPS" ]] && grep -qE '^[[:space:]]*features[[:space:]]*=' "$PROPS"; then
+    FEATURES=$(prop 'features')
+else
+    FEATURES="fetch scheduler templates"
+fi
+FEATURES=${FEATURES//,/ }
+
+feature_on() {
+    local want=$1 f
+    for f in $FEATURES; do
+        if [[ "$f" == "$want" ]]; then return 0; fi
+    done
+    return 1
+}
+
+drop_sources() {
+    local pattern=$1 keep=() f
+    for f in "${RUNTIME[@]}"; do
+        if [[ "$f" != $pattern ]]; then keep+=("$f"); fi
+    done
+    RUNTIME=(${keep[@]+"${keep[@]}"})
+}
+
+for known in fetch scheduler templates; do
+    if feature_on "$known"; then
+        CFLAGS+=("-DGARGANTUA_FEATURE_$(echo "$known" | tr '[:lower:]' '[:upper:]')")
+    else
+        case "$known" in
+            fetch)     drop_sources 'src/runtime/fetch*.c' ;;
+            scheduler) drop_sources 'src/runtime/scheduler.c' ;;
+            templates) drop_sources 'src/http/template.c' ;;
+        esac
+    fi
+done
+echo "  features: $FEATURES"
+
 VENDOR=()
 if [[ -d vendor ]]; then
     while IFS= read -r -d '' f; do
@@ -292,6 +335,47 @@ else
 fi
 
 if [[ "$ACTION" == build ]]; then exit 0; fi
+
+if [[ "$ACTION" == dev ]]; then
+    DEV_PID=""
+    stop_server() {
+        if [[ -n "$DEV_PID" ]] && kill -0 "$DEV_PID" 2>/dev/null; then
+            kill "$DEV_PID" 2>/dev/null || true
+            wait "$DEV_PID" 2>/dev/null || true
+        fi
+        DEV_PID=""
+    }
+    trap 'stop_server; echo; echo "  stopped"; exit 0' INT TERM
+
+    # Content, not timestamps: saving a file without changing it rebuilds nothing.
+    digest() {
+        find "$APP" src include -type f \
+             \( -name '*.c' -o -name '*.h' -o -name '*.properties' \) 2>/dev/null \
+            | sort | xargs shasum 2>/dev/null | shasum | cut -d ' ' -f 1
+    }
+
+    echo "  watching $APP/ src/ include/ — ctrl-c to stop"
+    "$OUT/server" &
+    DEV_PID=$!
+    LAST=$(digest)
+
+    while true; do
+        sleep 1
+        NOW=$(digest)
+        if [[ "$NOW" == "$LAST" ]]; then continue; fi
+        LAST=$NOW
+
+        echo
+        echo "  change detected, rebuilding"
+        stop_server
+        if "$0" build; then
+            "$OUT/server" &
+            DEV_PID=$!
+        else
+            echo "  build failed — fix it and save again" >&2
+        fi
+    done
+fi
 
 echo
 exec "$OUT/server"

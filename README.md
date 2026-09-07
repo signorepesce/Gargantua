@@ -181,6 +181,33 @@ The path is relative to the working directory. In the container it is set to
 `/data/gargantua.db` through the `DATABASE_URL` environment variable, so the
 database lives on the mounted volume and survives rebuilds.
 
+## Features
+
+Parts of the framework are optional. Name the ones you want in
+`app/application.properties`:
+
+```
+features = fetch, scheduler, templates
+```
+
+Leave the line out entirely and you get all of them. Write it empty and you get
+none. A feature that is off is neither compiled into the binary nor called from
+the generated `main()`, so it costs nothing at runtime.
+
+| feature | what it gives you |
+|---|---|
+| `fetch` | `$fetch` — the outbound http client |
+| `scheduler` | `$repeat` and `$on_start` background tasks |
+| `templates` | template rendering |
+
+Dropping `fetch` is the one that shows: it pulls in OpenSSL, whose start-up
+allocations dominate the idle footprint.
+
+| features | binary | idle RSS |
+|---|---|---|
+| all three | 176 kB | 6.6 MB |
+| none | 156 kB | **2.1 MB** |
+
 ## Container
 
 The image is only the backend — a static musl build in a `scratch` image,
@@ -220,3 +247,7 @@ properties file.
     src/server/     tcp server and worker pool
     src/generator/  the code generator
     app/            your application
+
+## License
+
+MIT — see [LICENSE](LICENSE).
