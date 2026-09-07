@@ -226,7 +226,7 @@ int field_validate(const FieldInfo *f, const void *obj, const char *path)
     {
         long double value = 0;
         if (f->kind == FIELD_INT) { value = read_int(obj, f->offset); }
-        else if (f->kind == FIELD_LONG) { long n; memcpy(&n, (const char *)obj + f->offset, sizeof(n)); value = n; }
+        else if (f->kind == FIELD_LONG) { long n; memcpy(&n, (const char *)obj + f->offset, sizeof(n)); value = (long double)n; }
         else if (f->kind == FIELD_DOUBLE) { double n; memcpy(&n, (const char *)obj + f->offset, sizeof(n)); value = n; }
         if (!isfinite(value) || ((r->flags & RULE_MIN) && value < r->min))
         { (void)snprintf(message, sizeof(message), "must be at least %.21Lg", r->min); field_error_add(path, "min", message); return -1; }
