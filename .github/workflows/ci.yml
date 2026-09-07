@@ -11,7 +11,7 @@ jobs:
     name: tests and build (gcc / glibc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install sqlite headers
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - name: Unit tests
@@ -23,7 +23,7 @@ jobs:
     name: tests and build (clang)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Unit tests
         run: ./eat test
       - name: Build
@@ -36,7 +36,7 @@ jobs:
     steps:
       - name: Install toolchain
         run: apk add --no-cache gcc musl-dev bash sqlite-static sqlite-dev tar
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Unit tests
         run: ./eat test
       - name: Static build
@@ -61,7 +61,7 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install postgres headers
         run: sudo apt-get update && sudo apt-get install -y libpq-dev curl
       - name: Write an application that uses the database
@@ -155,7 +155,7 @@ jobs:
       matrix:
         driver: [sqlite, postgres]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Select the driver
         run: |
           if [ "${{ matrix.driver }}" = "postgres" ]; then
