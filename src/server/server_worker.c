@@ -184,14 +184,10 @@ static int start_workers(void)
 
     for (int i = 0; i < g_worker_count; i++)
     {
-        pthread_attr_t attr;
-        if (pthread_attr_init(&attr) != 0) { return -1; }
-        (void)pthread_attr_setstacksize(&attr, (size_t)SERVER_STACK);
-        int made = pthread_create(&g_worker_threads[i], &attr, worker_main, &g_workers[i]);
-        (void)pthread_attr_destroy(&attr);
+        int made = pthread_create(&g_worker_threads[i], NULL, worker_main, &g_workers[i]);
         if (made != 0)
         {
-            (void)fprintf(stderr, "gargantua: the thread did not start\n");
+            (void)fprintf(stderr, "gargantua: the thread did not start: %s\n", strerror(made));
             stop_workers();
             return -1;
         }

@@ -139,12 +139,7 @@ int scheduler_start(void)
     for (int i = 0; i < count; i++)
     {
         if (tasks[i].interval_ms == 0L) { continue; }
-        pthread_attr_t attr;
-        if (pthread_attr_init(&attr) != 0) { return -1; }
-        (void)pthread_attr_setstacksize(&attr, (size_t)SCHEDULER_STACK);
-        int made = pthread_create(&task_threads[started_threads], &attr, scheduler_run_repeatedly, &task_runners[i]);
-        (void)pthread_attr_destroy(&attr);
-        if (made != 0)
+        if (pthread_create(&task_threads[started_threads], NULL, scheduler_run_repeatedly, &task_runners[i]) != 0)
         {
             scheduler_stop();
             return -1;

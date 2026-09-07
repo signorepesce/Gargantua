@@ -44,30 +44,17 @@ jobs:
           EXTRA_CFLAGS="-static -Os" EXTRA_LDFLAGS="-Wl,--gc-sections -s" ./eat build
           ls -la .build/server
 
-  postgres:
-    name: integration (postgres)
+  integration:
+    name: integration (end to end)
     runs-on: ubuntu-latest
-    services:
-      db:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: secret
-          POSTGRES_DB: gargantua
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 15
-        ports:
-          - 5432:5432
     steps:
       - uses: actions/checkout@v5
-      - name: Install postgres headers
-        run: sudo apt-get update && sudo apt-get install -y libpq-dev curl
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev curl
       - name: Write an application that uses the database
         run: |
-          mkdir -p pgapp
-          cat > pgapp/Note.c <<'C'
+          mkdir -p itapp
+          cat > itapp/Note.c <<'C'
           #include <gargantua.h>
 
           $table(Note)
@@ -77,7 +64,7 @@ jobs:
               str body;
           };
           C
-          cat > pgapp/note_controller.c <<'C'
+          cat > itapp/note_controller.c <<'C'
           #include <gargantua.h>
 
           $on_start
@@ -105,18 +92,16 @@ jobs:
               return Note_list(50);
           }
           C
-          cat > pgapp/application.properties <<'P'
+          cat > itapp/application.properties <<'P'
           server.port     = 8100
           server.address  = 127.0.0.1
           server.workers  = 4
-          database.driver = postgres
-          database.url    = postgresql://postgres:secret@127.0.0.1/gargantua
-          fetch.tls       = off
+          database.url    = it.db
           static.root     =
           templates.root  =
           P
-      - name: Build against postgres
-        run: APP=pgapp ./eat build
+      - name: Build
+        run: APP=itapp ./eat build
       - name: Run and exercise the API
         run: |
           ./.build/server > server.log 2>&1 &
@@ -134,7 +119,6 @@ jobs:
             exit 1
           fi
           head -2 server.log
-          grep -q "database: postgres (connected)" server.log
 
           code=$(curl -s -o body.json -w '%{http_code}' -X POST \
                  -H 'Content-Type: application/json' \
@@ -157,22 +141,11 @@ jobs:
           [ "$code" = "400" ]
 
   image:
-    name: container image (${{ matrix.driver }})
+    name: container image
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        driver: [sqlite, postgres]
     steps:
       - uses: actions/checkout@v5
-      - name: Select the driver
-        run: |
-          if [ "${{ matrix.driver }}" = "postgres" ]; then
-            sed -i 's|^database.url .*|database.url        = postgresql://postgres:secret@db/gargantua|' app/application.properties
-            sed -i '/^database.url/i database.driver     = postgres' app/application.properties
-          fi
-          grep -E '^database\.' app/application.properties
       - name: Build image
-        run: docker build --build-arg PACK=0 -t gargantua:${{ matrix.driver }} .
+        run: docker build --build-arg PACK=0 -t gargantua .
       - name: Report size
         run: docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' gargantua

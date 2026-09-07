@@ -83,7 +83,7 @@ fi
 
 RUNTIME=()
 while IFS= read -r f; do RUNTIME+=("$f"); done \
-    < <(find src -name '*.c' ! -path 'src/generator/*' ! -name 'db_sqlite.c' ! -name 'db_postgres.c' | sort)
+    < <(find src -name '*.c' ! -path 'src/generator/*' | sort)
 TOOLSRC=()
 while IFS= read -r f; do TOOLSRC+=("$f"); done \
     < <(find src/generator -name '*.c' | sort)
@@ -131,22 +131,9 @@ if [[ -f "$PROPS" ]]; then
 fi
 if [[ -n "${DATABASE_DRIVER:-}" ]]; then DRIVER=$DATABASE_DRIVER; fi
 
-if [[ "$DRIVER" != sqlite && "$DRIVER" != postgres ]]; then
-    echo "database.driver accepts sqlite or postgres (got '$DRIVER')" >&2
+if [[ "$DRIVER" != sqlite ]]; then
+    echo "only SQLite is supported: remove database.driver or set it to sqlite" >&2
     exit 2
-fi
-if [[ ! -f "src/db/db_$DRIVER.c" ]]; then
-    echo "no driver source for '$DRIVER'" >&2
-    exit 2
-fi
-RUNTIME+=("src/db/db_$DRIVER.c")
-if [[ "$DRIVER" == postgres ]]; then
-    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libpq; then
-        read -r -a PQ_CFLAGS <<< "$(pkg-config --cflags libpq)"
-        ((${#PQ_CFLAGS[@]} > 0)) && CFLAGS+=("${PQ_CFLAGS[@]}")
-    elif [[ -d /usr/include/postgresql ]]; then
-        CFLAGS+=(-I/usr/include/postgresql)
-    fi
 fi
 
 prop() {
@@ -282,7 +269,7 @@ fi
 ./gargantua "${SRC[@]}" -o "$OUT/app.gen.c" -m
 CFLAGS+=("-DCONFIG_FILE=\"$PROPS\"")
 
-if [[ "$DRIVER" == postgres ]]; then LINK=(-lpq); else LINK=(-lsqlite3); fi
+LINK=(-lsqlite3)
 if [[ -n "${EXTRA_LDFLAGS:-}" ]]; then
     read -r -a EXTRA_L <<< "$EXTRA_LDFLAGS"
     LINK+=("${EXTRA_L[@]}")
