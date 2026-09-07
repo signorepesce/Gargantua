@@ -1,6 +1,6 @@
 # Gargantua
 
-A small web framework for C. You write annotated structs and handlers; the
+A small vibe-coded web framework for C. You write annotated structs and handlers; the
 generator writes the entry point, the routing table, the JSON binding and the
 CRUD layer for you.
 
