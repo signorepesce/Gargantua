@@ -11,6 +11,7 @@
 #define SERVER_IDLE_S     5
 #define SERVER_KEEPALIVE_MAX 100
 
+void server_banner(void);
 int server_run(int port);
 
 #endif

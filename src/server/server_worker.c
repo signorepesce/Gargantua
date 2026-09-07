@@ -263,6 +263,8 @@ static void print_routes(int port)
     assert(port > 0);
     assert(port < 65536);
 
+    server_banner();
+
     (void)printf("listening on http://%s:%d" "  (%d workers, %d routes)\n", config_str("server.address", "127.0.0.1"), port, g_worker_count, route_count());
 
     const Route *table = route_table();

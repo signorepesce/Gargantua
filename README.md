@@ -1,4 +1,4 @@
-# Gargantua
+# Gargantua <img width="42" height="42" alt="hat" src="resources/hat.png" />
 
 A small vibe-coded web framework for C. You write annotated structs and handlers; the
 generator writes the entry point, the routing table, the JSON binding and the
