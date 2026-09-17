@@ -10,7 +10,7 @@
 #include "response.h"
 #include "static_files.h"
 #include "db.h"
-#include "gargantua.h"
+#include "framework_internal.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
@@ -30,42 +30,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SERVER_BACKLOG    32
-#define SERVER_SEND_MAX   4096
-#define SERVER_READ_STEPS 4096
-#define TEXT_CONTENT_TYPE           "text/plain; charset=utf-8"
-#define JSON_CONTENT_TYPE           "application/json; charset=utf-8"
-
-typedef struct
-{
-    int             fds[SERVER_QUEUE];
-    uint32_t        ips[SERVER_QUEUE];
-    int             head;
-    int             tail;
-    int             count;
-    int             stopping;
-    pthread_mutex_t lock;
-    pthread_cond_t  not_empty;
-} ConnQueue;
-
-typedef struct
-{
-    uint32_t      ip;
-    Arena       arena;
-    DynBuf        req;
-} Worker;
-_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal stop must be lock free");
-typedef struct
-{
-    uint32_t ip;
-    int used;
-    int connections;
-    int requests;
-    time_t window;
-} ClientLimit;
 #include "server_internal.h"
 
-static int serve_static(Worker *w, int sock, const HttpRequest *req, const char *path, int keep_alive, int *status_out, int *handled)
+static int serve_static(Worker *w, int sock, const HttpRequest *req, const char *path, int keep_alive, int *status_out,
+                        int *handled)
 {
     assert(w != NULL);
     assert(req != NULL);
@@ -75,37 +43,50 @@ static int serve_static(Worker *w, int sock, const HttpRequest *req, const char 
 
     *handled = 0;
 
-    if ((static_files_enabled() == 0) || ((strcmp(req->method, "GET") != 0) && (strcmp(req->method, "HEAD") != 0))) { return 0; }
+    if ((static_files_enabled() == 0) || ((strcmp(req->method, "GET") != 0) && (strcmp(req->method, "HEAD") != 0)))
+    {
+        return 0;
+    }
 
     char *buffer = arena_alloc(&w->arena, (size_t)STATIC_MAX_BYTES);
-    if (buffer == NULL) { return 0; }
+    if (buffer == NULL)
+    {
+        return 0;
+    }
 
-    size_t      len          = 0u;
+    size_t len = 0u;
     const char *content_type = NULL;
-    if (static_file_read(path, buffer, (size_t)STATIC_MAX_BYTES, &len, &content_type) != 0) { return 0; }
+    if (static_file_read(path, buffer, (size_t)STATIC_MAX_BYTES, &len, &content_type) != 0)
+    {
+        return 0;
+    }
 
     response_allow[0] = '\0';
-    response_route    = "<static>";
-    *handled          = 1;
-    *status_out       = 200;
+    response_route = "<static>";
+    *handled = 1;
+    *status_out = 200;
 
     return send_bytes(sock, 200, content_type, buffer, len, keep_alive);
 }
 
-static int serve_missing_route(int sock, const HttpRequest *req, const RequestParams *params, int allowed, int keep_alive, int *status_out)
+static int serve_missing_route(int sock, const HttpRequest *req, const RequestParams *params, int allowed,
+                               int keep_alive, int *status_out)
 {
     assert(req != NULL);
     assert(params != NULL);
     assert(status_out != NULL);
 
-    int status = (params->invalid || (allowed < 0)) ? 400
-               : (allowed ? 405 : 404);
+    int status = (params->invalid || (allowed < 0)) ? 400 : (allowed ? 405 : 404);
 
-    if ((allowed > 0) && (params->invalid == 0) && (strcmp(req->method, "OPTIONS") == 0)) { status = 204; }
+    if ((allowed > 0) && (params->invalid == 0) && (strcmp(req->method, "OPTIONS") == 0))
+    {
+        status = 204;
+    }
 
-    const char *message = (status == 400) ? "bad path parameter"
-                        : (status == 405) ? "method not allowed"
-                        : (status == 204) ? "" : "no route";
+    const char *message = (status == 400)   ? "bad path parameter"
+                          : (status == 405) ? "method not allowed"
+                          : (status == 204) ? ""
+                                            : "no route";
 
     *status_out = status;
 
@@ -116,8 +97,7 @@ static int openapi_needs_auth(const char *path)
 {
     assert(path != NULL);
 
-    return (strcmp(path, "/openapi.json") == 0) &&
-           (strcmp(config_str("openapi.public", "false"), "true") != 0) &&
+    return (strcmp(path, "/openapi.json") == 0) && (strcmp(config_str("openapi.public", "false"), "true") != 0) &&
            (auth_gate(0, "", 0) != 0);
 }
 
@@ -151,15 +131,18 @@ static const Route *resolve_route(const HttpRequest *req, const char *path, Requ
     assert(params != NULL);
     assert(allowed != NULL);
 
-    params->path_count  = 0;
+    params->path_count = 0;
     params->query_count = 0;
-    params->invalid     = 0;
+    params->invalid = 0;
 
     const Route *route = route_find(req->method, path, params);
     response_route = (route == NULL) ? "<unmatched>" : route->url;
 
     *allowed = 0;
-    if ((route == NULL) || (strcmp(req->method, "OPTIONS") == 0)) { *allowed = route_allow(path, response_allow, sizeof(response_allow)); }
+    if ((route == NULL) || (strcmp(req->method, "OPTIONS") == 0))
+    {
+        *allowed = route_allow(path, response_allow, sizeof(response_allow));
+    }
 
     return route;
 }
@@ -175,24 +158,37 @@ static char *prepare_handler(Worker *w, const HttpRequest *req, size_t *cap_out)
 
     size_t blen = (req->content_length > 0) ? (size_t)req->content_length : req->body_len;
     size_t want = (size_t)SERVER_RESP_MIN;
-    if (blen > want) { want = blen + (size_t)SERVER_RESP_MIN; }
-    if (want > (size_t)SERVER_BODY_MAX) { want = (size_t)SERVER_BODY_MAX; }
+    if (blen > want)
+    {
+        want = blen + (size_t)SERVER_RESP_MIN;
+    }
+    if (want > (size_t)SERVER_BODY_MAX)
+    {
+        want = (size_t)SERVER_BODY_MAX;
+    }
 
     char *body = arena_alloc(&w->arena, want);
-    if (body != NULL) { request_fail_reset(); }
+    if (body != NULL)
+    {
+        request_fail_reset();
+    }
     *cap_out = want;
 
     return body;
 }
 
-int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char *query, char *body_in, size_t body_len, int keep_alive, int *status_out)
+int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char *query, char *body_in, size_t body_len,
+                  int keep_alive, int *status_out)
 {
     assert(w != NULL);
     assert(req != NULL);
     assert(path != NULL);
     assert(status_out != NULL);
 
-    if (is_health_path(path) != 0) { return serve_health(sock, req, path, keep_alive, status_out); }
+    if (is_health_path(path) != 0)
+    {
+        return serve_health(sock, req, path, keep_alive, status_out);
+    }
 
     RequestParams params;
     int allowed = 0;
@@ -200,17 +196,26 @@ int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char 
 
     int handled = 0;
     int sent = serve_preflight(sock, req, keep_alive, status_out, &handled);
-    if (handled != 0) { return sent; }
+    if (handled != 0)
+    {
+        return sent;
+    }
 
     if (route == NULL)
     {
         int served = 0;
         int rc = serve_static(w, sock, req, path, keep_alive, status_out, &served);
-        if (served != 0) { return rc; }
+        if (served != 0)
+        {
+            return rc;
+        }
         return serve_missing_route(sock, req, &params, allowed, keep_alive, status_out);
     }
 
-    if (strcmp(req->method, "OPTIONS") != 0) { response_allow[0] = '\0'; }
+    if (strcmp(req->method, "OPTIONS") != 0)
+    {
+        response_allow[0] = '\0';
+    }
 
     if (query_parse(&params, query) != 0)
     {
@@ -235,7 +240,10 @@ int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char 
     assert(route->handler != NULL);
     int rc = dispatch_route(route->handler, &params, body_in, body_len, body, body_cap);
 
-    if ((request_failed() == 1) || (rc != 0)) { return serve_handler_error(sock, rc, keep_alive, status_out); }
+    if ((request_failed() == 1) || (rc != 0))
+    {
+        return serve_handler_error(sock, rc, keep_alive, status_out);
+    }
 
     *status_out = response_status_get(route->status);
 
@@ -251,8 +259,7 @@ void log_request(const struct timeval *start, const char *method, const char *pa
     struct timeval now;
     (void)gettimeofday(&now, NULL);
 
-    long usec = ((now.tv_sec - start->tv_sec) * 1000000L) +
-                (now.tv_usec - start->tv_usec);
+    long usec = ((now.tv_sec - start->tv_sec) * 1000000L) + (now.tv_usec - start->tv_usec);
 
     const char *label = response_route == NULL ? "<unmatched>" : response_route;
     char safe[ROUTE_MAX_URL];
@@ -264,7 +271,8 @@ void log_request(const struct timeval *start, const char *method, const char *pa
     }
     safe[at] = '\0';
     flockfile(stdout);
-    (void)printf("{\"method\":\"%s\",\"route\":\"%s\",\"status\":%d,\"duration_us\":%ld}\n", method, safe, status, usec);
+    (void)printf("{\"method\":\"%s\",\"route\":\"%s\",\"status\":%d,\"duration_us\":%ld}\n", method, safe, status,
+                 usec);
     funlockfile(stdout);
     (void)fflush(stdout);
 }
@@ -275,13 +283,13 @@ void reset_response_state(void)
     request_fail_reset();
     response_reset();
 
-    response_route     = NULL;
-    response_head      = 0;
-    response_cors      = 0;
+    response_route = NULL;
+    response_head = 0;
+    response_cors = 0;
     response_preflight = 0;
 
-    response_allow[0]             = '\0';
-    response_origin[0]            = '\0';
+    response_allow[0] = '\0';
+    response_origin[0] = '\0';
     response_requested_headers[0] = '\0';
 }
 
@@ -295,7 +303,10 @@ void send_read_error(int sock, int rc)
         return;
     }
 
-    if (rc == -3) { (void)send_response(sock, 417, JSON_CONTENT_TYPE, "unsupported expectation", 0); }
+    if (rc == -3)
+    {
+        (void)send_response(sock, 417, JSON_CONTENT_TYPE, "unsupported expectation", 0);
+    }
 }
 
 int keep_alive_wanted(const HttpRequest *req, int served)
@@ -304,9 +315,22 @@ int keep_alive_wanted(const HttpRequest *req, int served)
 
     int keep = (req->minor_version == 1) ? 1 : 0;
 
-    if (request_header_has_token(req, "Connection", "close") != 0) { keep = 0; }
-    if ((req->minor_version == 0) && (request_header_has_token(req, "Connection", "keep-alive") != 0)) { keep = 1; }
-    if (served == (SERVER_KEEPALIVE_MAX - 1)) { keep = 0; }
+    if (request_header_has_token(req, "Connection", "close") != 0)
+    {
+        keep = 0;
+    }
+    if ((req->minor_version == 0) && (request_header_has_token(req, "Connection", "keep-alive") != 0))
+    {
+        keep = 1;
+    }
+    if (g_stop != 0)
+    {
+        keep = 0;
+    }
+    if (served == (SERVER_KEEPALIVE_MAX - 1))
+    {
+        keep = 0;
+    }
 
     return keep;
 }
@@ -321,7 +345,10 @@ void finish_request(Worker *w)
     request_bind(NULL);
     arena_bind(NULL);
 
-    if (arena_reset(&w->arena) != 0) { (void)fprintf(stderr, "gargantua: out-of-bounds write!\n"); }
+    if (arena_reset(&w->arena) != 0)
+    {
+        (void)fprintf(stderr, "gargantua: out-of-bounds write!\n");
+    }
 }
 
 int consume_message(Worker *w, const HttpRequest *req)
@@ -329,10 +356,16 @@ int consume_message(Worker *w, const HttpRequest *req)
     assert(w != NULL);
     assert(req != NULL);
 
-    if (req->message_len > w->req.len) { return -1; }
+    if (req->message_len > w->req.len)
+    {
+        return -1;
+    }
 
     dynbuf_consume(&w->req, req->message_len);
-    if (w->req.data != NULL) { w->req.data[w->req.len] = '\0'; }
+    if (w->req.data != NULL)
+    {
+        w->req.data[w->req.len] = '\0';
+    }
 
     return 0;
 }

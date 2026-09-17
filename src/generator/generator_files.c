@@ -22,7 +22,7 @@ char *source_file_read(const char *path, size_t *out_len)
     size_t n = fread(g_src, 1u, (size_t)GENERATOR_MAX_SOURCE + 1u, f);
 
     int too_big = (n > (size_t)GENERATOR_MAX_SOURCE) ? 1 : 0;
-    int failed  = (ferror(f) != 0) ? 1 : 0;
+    int failed = (ferror(f) != 0) ? 1 : 0;
 
     if (fclose(f) != 0)
     {

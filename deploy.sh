@@ -15,7 +15,7 @@ else
 fi
 
 checksum() {
-    find eat Dockerfile src include app -type f -print0 \
+    find eat Dockerfile src include tools examples app -type f -print0 \
         | sort -z | xargs -0 shasum | shasum | cut -d ' ' -f 1
 }
 

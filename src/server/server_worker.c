@@ -10,7 +10,7 @@
 #include "response.h"
 #include "static_files.h"
 #include "db.h"
-#include "gargantua.h"
+#include "framework_internal.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
@@ -30,39 +30,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SERVER_BACKLOG    32
-#define SERVER_SEND_MAX   4096
-#define SERVER_READ_STEPS 4096
-#define TEXT_CONTENT_TYPE           "text/plain; charset=utf-8"
-#define JSON_CONTENT_TYPE           "application/json; charset=utf-8"
-
-typedef struct
-{
-    int             fds[SERVER_QUEUE];
-    uint32_t        ips[SERVER_QUEUE];
-    int             head;
-    int             tail;
-    int             count;
-    int             stopping;
-    pthread_mutex_t lock;
-    pthread_cond_t  not_empty;
-} ConnQueue;
-
-typedef struct
-{
-    uint32_t      ip;
-    Arena       arena;
-    DynBuf        req;
-} Worker;
-_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal stop must be lock free");
-typedef struct
-{
-    uint32_t ip;
-    int used;
-    int connections;
-    int requests;
-    time_t window;
-} ClientLimit;
 #include "server_internal.h"
 
 static void handle_connection(Worker *w, int sock)
@@ -72,14 +39,17 @@ static void handle_connection(Worker *w, int sock)
 
     for (int served = 0; served < SERVER_KEEPALIVE_MAX; served++)
     {
-        if (g_drain_over != 0) { return; }
+        if (g_drain_over != 0)
+        {
+            return;
+        }
 
         HttpRequest req = {0};
         reset_response_state();
 
         int rc = read_request(sock, &w->req, &req);
-        response_head = (strcmp(req.method, "HEAD") == 0) ||
-                        ((w->req.len >= 5u) && (memcmp(w->req.data, "HEAD ", 5u) == 0));
+        response_head =
+            (strcmp(req.method, "HEAD") == 0) || ((w->req.len >= 5u) && (memcmp(w->req.data, "HEAD ", 5u) == 0));
         if (rc != 1)
         {
             send_read_error(sock, rc);
@@ -99,7 +69,7 @@ static void handle_connection(Worker *w, int sock)
         struct timeval start;
         (void)gettimeofday(&start, NULL);
 
-        char  path[HTTP_MAX_PATH];
+        char path[HTTP_MAX_PATH];
         char *query = NULL;
         (void)snprintf(path, sizeof(path), "%s", req.path);
         if (split_path(path, &query) != 0)
@@ -108,16 +78,22 @@ static void handle_connection(Worker *w, int sock)
             return;
         }
 
-        size_t body_len = (req.content_length > 0)
-                              ? (size_t)req.content_length : req.body_len;
+        size_t body_len = (req.content_length > 0) ? (size_t)req.content_length : req.body_len;
         int status = 0;
-        int cont = serve_request(w, sock, &req, path, query, (char *)(size_t)req.body, body_len, keep_alive_wanted(&req, served), &status);
+        int cont = serve_request(w, sock, &req, path, query, (char *)(size_t)req.body, body_len,
+                                 keep_alive_wanted(&req, served), &status);
 
         log_request(&start, req.method, req.path, status);
         finish_request(w);
 
-        if ((cont != 0) || (g_drain_over != 0)) { return; }
-        if (consume_message(w, &req) != 0) { return; }
+        if ((cont != 0) || (g_drain_over != 0))
+        {
+            return;
+        }
+        if (consume_message(w, &req) != 0)
+        {
+            return;
+        }
     }
 }
 
@@ -130,10 +106,19 @@ static void *worker_main(void *arg)
     for (;;)
     {
         int fd = queue_pop(&w->ip);
-        if (fd < 0) { break; }
+        if (fd < 0)
+        {
+            break;
+        }
 
+        (void)pthread_mutex_lock(&g_queue.lock);
+        w->socket = fd;
+        (void)pthread_mutex_unlock(&g_queue.lock);
         handle_connection(w, fd);
+        (void)pthread_mutex_lock(&g_queue.lock);
         (void)close(fd);
+        w->socket = -1;
+        (void)pthread_mutex_unlock(&g_queue.lock);
         (void)client_limit(w->ip, -1);
         (void)arena_reset(&w->arena);
         dynbuf_release(&w->req);
@@ -144,10 +129,17 @@ static void *worker_main(void *arg)
 
 static void reject_busy(int fd)
 {
-    const char body[] = "{\"status\":503,\"code\":\"unavailable\",\"error\":\"server busy\",\"fields\":[],\"truncated\":false}";
+    const char body[] =
+        "{\"status\":503,\"code\":\"unavailable\",\"error\":\"server busy\",\"fields\":[],\"truncated\":false}";
     char response[512];
-    int n = snprintf(response, sizeof(response), "HTTP/1.1 503 Service Unavailable\r\n" "Content-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", sizeof(body) - 1u, body);
-    if (n > 0 && (size_t)n < sizeof(response)) { (void)send(fd, response, (size_t)n, 0); }
+    int n = snprintf(response, sizeof(response),
+                     "HTTP/1.1 503 Service Unavailable\r\n"
+                     "Content-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                     sizeof(body) - 1u, body);
+    if (n > 0 && (size_t)n < sizeof(response))
+    {
+        (void)send(fd, response, (size_t)n, 0);
+    }
     (void)close(fd);
 }
 
@@ -160,11 +152,17 @@ static int start_workers(void)
     assert(SERVER_ARENA > 0);
 
     g_worker_count = config_int("server.workers", SERVER_WORKERS);
-    if ((g_worker_count < 1) || (g_worker_count > SERVER_WORKERS)) { g_worker_count = SERVER_WORKERS; }
+    if ((g_worker_count < 1) || (g_worker_count > SERVER_WORKERS))
+    {
+        g_worker_count = SERVER_WORKERS;
+    }
 
     memset(&g_queue, 0, sizeof(g_queue));
     g_workers_started = 0;
-    if (pthread_mutex_init(&g_queue.lock, NULL) != 0) { return -1; }
+    if (pthread_mutex_init(&g_queue.lock, NULL) != 0)
+    {
+        return -1;
+    }
     if (pthread_cond_init(&g_queue.not_empty, NULL) != 0)
     {
         (void)pthread_mutex_destroy(&g_queue.lock);
@@ -173,7 +171,11 @@ static int start_workers(void)
 
     for (int i = 0; i < g_worker_count; i++)
     {
-        if (dynbuf_init(&g_workers[i].req, (size_t)SERVER_REQ_MAX) != 0) { return -1; }
+        g_workers[i].socket = -1;
+        if (dynbuf_init(&g_workers[i].req, (size_t)SERVER_REQ_MAX) != 0)
+        {
+            return -1;
+        }
         if (arena_init(&g_workers[i].arena, (size_t)SERVER_ARENA) != 0)
         {
             (void)fprintf(stderr, "gargantua: the arena was not initialised\n");
@@ -212,8 +214,47 @@ static void stop_workers(void)
     (void)pthread_cond_broadcast(&g_queue.not_empty);
     (void)pthread_mutex_unlock(&g_queue.lock);
 
-    for (int i = 0; i < g_workers_started; i++) { (void)pthread_join(g_worker_threads[i], NULL); }
+    int waited_ms = 0;
+    while (waited_ms < g_drain_ms)
+    {
+        int active = 0;
+        (void)pthread_mutex_lock(&g_queue.lock);
+        for (int i = 0; i < g_workers_started; i++)
+        {
+            if (g_workers[i].socket >= 0)
+            {
+                active++;
+            }
+        }
+        (void)pthread_mutex_unlock(&g_queue.lock);
+        if (!active)
+        {
+            break;
+        }
+        struct timespec pause = {0, 10000000L};
+        (void)nanosleep(&pause, NULL);
+        waited_ms += 10;
+    }
+    (void)pthread_mutex_lock(&g_queue.lock);
+    for (int i = 0; i < g_workers_started; i++)
+    {
+        if (g_workers[i].socket >= 0)
+        {
+            (void)shutdown(g_workers[i].socket, SHUT_RDWR);
+        }
+    }
+    (void)pthread_mutex_unlock(&g_queue.lock);
+
+    for (int i = 0; i < g_workers_started; i++)
+    {
+        (void)pthread_join(g_worker_threads[i], NULL);
+    }
     g_workers_started = 0;
+    for (int i = 0; i < g_worker_count; i++)
+    {
+        arena_free(&g_workers[i].arena);
+        dynbuf_release(&g_workers[i].req);
+    }
     (void)pthread_cond_destroy(&g_queue.not_empty);
     (void)pthread_mutex_destroy(&g_queue.lock);
 }
@@ -236,7 +277,7 @@ static int bind_listen(int port)
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons((unsigned short)port);
+    addr.sin_port = htons((unsigned short)port);
 
     const char *address = config_str("server.address", "127.0.0.1");
     if (inet_pton(AF_INET, address, &addr.sin_addr) != 1)
@@ -269,12 +310,17 @@ static void print_routes(int port)
 
     server_banner();
 
-    (void)printf("listening on http://%s:%d" "  (%d workers, %d routes)\n", config_str("server.address", "127.0.0.1"), port, g_worker_count, route_count());
+    (void)printf("listening on http://%s:%d"
+                 "  (%d workers, %d routes)\n",
+                 config_str("server.address", "127.0.0.1"), port, g_worker_count, route_count());
 
     const Route *table = route_table();
-    int            n     = route_count();
+    int n = route_count();
 
-    for (int i = 0; (i < n) && (i < SERVER_QUEUE); i++) { (void)printf("  %-6s %-22s -> %d\n", table[i].method, table[i].url, table[i].status); }
+    for (int i = 0; (i < n) && (i < SERVER_QUEUE); i++)
+    {
+        (void)printf("  %-6s %-22s -> %d\n", table[i].method, table[i].url, table[i].status);
+    }
     (void)printf("\n");
     (void)fflush(stdout);
 }
@@ -285,18 +331,28 @@ static int install_signal_handlers(void)
     memset(&action, 0, sizeof(action));
     action.sa_handler = on_signal;
 
-    if ((sigaction(SIGINT, &action, NULL) != 0) || (sigaction(SIGTERM, &action, NULL) != 0)) { return -1; }
-    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) { return -1; }
+    if ((sigaction(SIGINT, &action, NULL) != 0) || (sigaction(SIGTERM, &action, NULL) != 0))
+    {
+        return -1;
+    }
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+    {
+        return -1;
+    }
 
     return 0;
 }
 
 static int load_client_limits(void)
 {
-    g_connections_per_ip  = config_int("server.connections_per_ip", 16);
+    g_connections_per_ip = config_int("server.connections_per_ip", 16);
     g_requests_per_minute = config_int("server.requests_per_minute", 600);
 
-    if ((g_connections_per_ip < 1) || (g_connections_per_ip > 256) || (g_requests_per_minute < 1) || (g_requests_per_minute > 1000000)) { return -1; }
+    if ((g_connections_per_ip < 1) || (g_connections_per_ip > 256) || (g_requests_per_minute < 1) ||
+        (g_requests_per_minute > 1000000))
+    {
+        return -1;
+    }
 
     return 0;
 }
@@ -304,7 +360,10 @@ static int load_client_limits(void)
 static int set_nonblocking(int fd, int on)
 {
     int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) { return -1; }
+    if (flags < 0)
+    {
+        return -1;
+    }
 
     int wanted = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
 
@@ -314,13 +373,12 @@ static int set_nonblocking(int fd, int on)
 static int accept_one(int fd)
 {
     struct sockaddr_in peer;
-    socklen_t          peer_len = sizeof(peer);
+    socklen_t peer_len = sizeof(peer);
 
     int client = accept(fd, (struct sockaddr *)&peer, &peer_len);
     if (client < 0)
     {
-        return ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
-                   ? 0 : -1;
+        return ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK)) ? 0 : -1;
     }
 
     if (set_nonblocking(client, 0) != 0)
@@ -344,55 +402,33 @@ static int accept_one(int fd)
     return 0;
 }
 
-static int drain_expired(const struct timespec *started)
-{
-    assert(started != NULL);
-
-    if (g_drain_ms <= 0) { return 1; }
-
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) { return 1; }
-
-    long elapsed = ((now.tv_sec - started->tv_sec) * 1000L) +
-                   ((now.tv_nsec - started->tv_nsec) / 1000000L);
-
-    return (elapsed >= (long)g_drain_ms) ? 1 : 0;
-}
-
 static void accept_loop(int fd)
 {
-    struct timespec drain_started = {0, 0};
-    int             draining      = 0;
-
-    for (;;)
+    while (g_stop == 0)
     {
+        struct pollfd listener = {.fd = fd, .events = POLLIN, .revents = 0};
+        int available = poll(&listener, 1u, 100);
         if (g_stop != 0)
         {
-            if (draining == 0)
-            {
-                draining = 1;
-                if (clock_gettime(CLOCK_MONOTONIC, &drain_started) != 0) { break; }
-                if (g_drain_ms > 0)
-                {
-                    (void)printf("shutting down: drain %d ms\n", g_drain_ms);
-                    (void)fflush(stdout);
-                }
-            }
-            if (drain_expired(&drain_started) != 0) { break; }
-        }
-
-        struct pollfd listener = { .fd = fd, .events = POLLIN, .revents = 0 };
-
-        int available = poll(&listener, 1u, 100);
-        if (available < 0)
-        {
-            if (errno == EINTR) { continue; }
             break;
         }
-        if ((available == 0) || ((listener.revents & POLLIN) == 0)) { continue; }
-        if (accept_one(fd) != 0) { break; }
+        if (available < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            break;
+        }
+        if (available == 0 || !(listener.revents & POLLIN))
+        {
+            continue;
+        }
+        if (accept_one(fd) != 0)
+        {
+            break;
+        }
     }
-
     g_drain_over = 1;
 }
 
@@ -401,15 +437,24 @@ int server_run(int port)
     assert(port > 0);
     assert(port < 65536);
 
-    g_stop       = 0;
+    g_stop = 0;
     g_drain_over = 0;
     memset(g_clients, 0, sizeof(g_clients));
 
     g_drain_ms = config_int("server.drain_ms", 0);
-    if ((g_drain_ms < 0) || (g_drain_ms > 120000)) { return -1; }
+    if ((g_drain_ms < 0) || (g_drain_ms > 120000))
+    {
+        return -1;
+    }
 
-    if ((load_client_limits() != 0) || (install_signal_handlers() != 0) || (static_files_init() != 0)) { return -1; }
-    if (start_workers() != 0) { return -1; }
+    if ((load_client_limits() != 0) || (install_signal_handlers() != 0) || (static_files_init() != 0))
+    {
+        return -1;
+    }
+    if (start_workers() != 0)
+    {
+        return -1;
+    }
 
     int fd = bind_listen(port);
     if (fd < 0)

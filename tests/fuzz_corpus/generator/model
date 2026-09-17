@@ -1,0 +1,7 @@
+#include <gargantua.h>
+$table(Person)
+{
+$id int id;
+$not_null str name;
+$nullable(int) age;
+};

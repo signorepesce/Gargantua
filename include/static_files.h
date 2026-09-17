@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#define STATIC_MAX_PATH  1024
+#define STATIC_MAX_PATH 1024
 #define STATIC_MAX_BYTES (256 * 1024)
 
 int static_files_init(void);

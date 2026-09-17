@@ -3,26 +3,8 @@
 
 #include "gargantua.h"
 
-#define DB_MAX_ARGS 64
-#define DB_MAX_SQL  8192
-
-typedef struct
-{
-    FieldKind kind;
-    int    i;
-    long   l;
-    double d;
-    str    s;
-} SqlArg;
-
-#define SQL_INT(v)      ((SqlArg){ FIELD_INT, (v), 0L, 0.0, "" })
-#define SQL_LONG(v)      ((SqlArg){ FIELD_LONG, 0, (v), 0.0, "" })
-#define SQL_DOUBLE(v)      ((SqlArg){ FIELD_DOUBLE, 0, 0L, (v), "" })
-#define SQL_BOOL(v)      ((SqlArg){ FIELD_BOOL, ((v) ? 1 : 0), 0L, 0.0, "" })
-#define SQL_TEXT(v)      ((SqlArg){ FIELD_STR, 0, 0L, 0.0, (v) })
-#define SQL_ARGS(...) ((const SqlArg[]){ __VA_ARGS__ }), \
-                     ((int)(sizeof((const SqlArg[]){ __VA_ARGS__ }) / sizeof(SqlArg)))
-#define SQL_NOARGS    ((const SqlArg *)0), 0
+RowList db_search(const TypeInfo *type, DbQuery query);
+int db_check_schema(const TypeInfo *type);
 
 RowList db_query_page(const TypeInfo *type, str key, str filter, int id, int page, int size);
 

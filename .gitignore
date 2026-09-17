@@ -10,3 +10,8 @@
 /data/
 .deploy-stamp
 /.idea/
+
+/.build-*/
+*.gen.c.api.h
+
+__pycache__/

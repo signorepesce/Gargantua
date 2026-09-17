@@ -25,7 +25,8 @@ int resolve_request(str url, Target *target);
 
 extern _Thread_local char g_wire[FETCH_MAX_RESPONSE];
 
-int build_request(char *out, size_t cap, const char *method, const Target *target, const char *content_type, size_t body_len);
+int build_request(char *out, size_t cap, const char *method, const Target *target, const char *content_type,
+                  size_t body_len);
 
 void channel_close(Channel *channel);
 

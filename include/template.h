@@ -3,9 +3,9 @@
 
 #include "gargantua.h"
 
-#define TEMPLATE_MAX_PATH  1024
+#define TEMPLATE_MAX_PATH 1024
 #define TEMPLATE_MAX_BYTES (128 * 1024)
-#define TEMPLATE_MAX_OUT   (256 * 1024)
+#define TEMPLATE_MAX_OUT (256 * 1024)
 #define TEMPLATE_MAX_VALUE 1024
 
 int template_init(void);

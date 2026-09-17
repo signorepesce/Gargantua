@@ -19,19 +19,20 @@
 static int is_c_keyword(const char *name)
 {
     static const char *const words[] = {
-        "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex",
-        "_Generic", "_Imaginary", "_Noreturn", "_Static_assert",
-        "_Thread_local", "auto", "break", "case", "char", "const",
-        "continue", "default", "do", "double", "else", "enum", "extern",
-        "float", "for", "goto", "if", "inline", "int", "long",
-        "register", "restrict", "return", "short", "signed", "sizeof",
-        "static", "struct", "switch", "typedef", "union", "unsigned",
-        "void", "volatile", "while"
-    };
+        "_Alignas",  "_Alignof",       "_Atomic",       "_Bool",   "_Complex", "_Generic", "_Imaginary",
+        "_Noreturn", "_Static_assert", "_Thread_local", "auto",    "break",    "case",     "char",
+        "const",     "continue",       "default",       "do",      "double",   "else",     "enum",
+        "extern",    "float",          "for",           "goto",    "if",       "inline",   "int",
+        "long",      "register",       "restrict",      "return",  "short",    "signed",   "sizeof",
+        "static",    "struct",         "switch",        "typedef", "union",    "unsigned", "void",
+        "volatile",  "while"};
 
     for (size_t i = 0u; i < (sizeof(words) / sizeof(words[0])); i++)
     {
-        if (strcmp(name, words[i]) == 0) { return 1; }
+        if (strcmp(name, words[i]) == 0)
+        {
+            return 1;
+        }
     }
     return 0;
 }
@@ -41,13 +42,22 @@ int is_safe_identifier(const char *name)
     assert(name != NULL);
 
     unsigned char first = (unsigned char)name[0];
-    if ((isalpha(first) == 0) || (strncmp(name, "wrap_", 5u) == 0) || (is_c_keyword(name) != 0)) { return 0; }
+    if ((isalpha(first) == 0) || (strncmp(name, "wrap_", 5u) == 0) || (is_c_keyword(name) != 0))
+    {
+        return 0;
+    }
 
     for (size_t i = 1u; i < GENERATOR_MAX_NAME; i++)
     {
-        if (name[i] == '\0') { return 1; }
+        if (name[i] == '\0')
+        {
+            return 1;
+        }
         unsigned char c = (unsigned char)name[i];
-        if ((isalnum(c) == 0) && (c != (unsigned char)'_')) { return 0; }
+        if ((isalnum(c) == 0) && (c != (unsigned char)'_'))
+        {
+            return 0;
+        }
     }
     return 0;
 }
@@ -70,7 +80,10 @@ void strip_comments(char *line, int *in_block)
                 *in_block = 0;
                 read += 2u;
             }
-            else { read++; }
+            else
+            {
+                read++;
+            }
             continue;
         }
 
@@ -82,18 +95,28 @@ void strip_comments(char *line, int *in_block)
             {
                 line[write++] = line[read++];
             }
-            else if (c == quote) { quote = '\0'; }
+            else if (c == quote)
+            {
+                quote = '\0';
+            }
             continue;
         }
 
-        if ((line[read] == '/') && (line[read + 1u] == '/')) { break; }
+        if ((line[read] == '/') && (line[read + 1u] == '/'))
+        {
+            break;
+        }
         if ((line[read] == '/') && (line[read + 1u] == '*'))
         {
+            line[write++] = ' ';
             *in_block = 1;
             read += 2u;
             continue;
         }
-        if ((line[read] == '\'') || (line[read] == '"')) { quote = line[read]; }
+        if ((line[read] == '\'') || (line[read] == '"'))
+        {
+            quote = line[read];
+        }
         line[write++] = line[read++];
     }
     line[write] = '\0';
@@ -112,7 +135,7 @@ int parse_table_name(Generator *ctx, int line_no, const char *line, char *out, s
         return -1;
     }
 
-    const char *open  = strchr(line, '(');
+    const char *open = strchr(line, '(');
     const char *close = strchr(open + 1, ')');
     if ((close == NULL) || (close[1] != '\0'))
     {
@@ -198,8 +221,11 @@ int parse_field(Generator *ctx, char *line, int lineno, ParsedField *out)
     assert(out != NULL);
 
     char *tok[GENERATOR_MAX_TOKENS];
-    int   n = line_split_words(line, tok, GENERATOR_MAX_TOKENS);
-    if (n == 0) { return 0; }
+    int n = line_split_words(line, tok, GENERATOR_MAX_TOKENS);
+    if (n == 0)
+    {
+        return 0;
+    }
 
     memset(out, 0, sizeof(*out));
 
@@ -207,7 +233,10 @@ int parse_field(Generator *ctx, char *line, int lineno, ParsedField *out)
     while ((i < n) && (i < GENERATOR_MAX_TOKENS))
     {
         unsigned flag = field_flag_from_word(tok[i]);
-        if (flag == 0u) { break; }
+        if (flag == 0u)
+        {
+            break;
+        }
         out->flags |= flag;
         i++;
     }
@@ -222,6 +251,22 @@ int parse_field(Generator *ctx, char *line, int lineno, ParsedField *out)
     {
         generator_error(ctx, lineno, "field type or name is too long");
         return -1;
+    }
+    if (strncmp(tok[i], "$nullable(", 10u) == 0)
+    {
+        size_t len = strlen(tok[i]);
+        if (len < 12u || tok[i][len - 1u] != ')')
+        {
+            return -1;
+        }
+        tok[i][len - 1u] = '\0';
+        tok[i] += 10;
+        if (strcmp(tok[i], "int") && strcmp(tok[i], "long") && strcmp(tok[i], "double") && strcmp(tok[i], "bool"))
+        {
+            generator_error(ctx, lineno, "$nullable supports int, long, double, bool");
+            return -1;
+        }
+        out->flags |= 8u;
     }
     const char *kind = field_kind_from_c_type(tok[i]);
     if (kind == NULL)
@@ -254,14 +299,20 @@ int line_only_annotations(const char *line, unsigned *flags)
     (void)snprintf(copy, sizeof(copy), "%s", line);
 
     char *tok[GENERATOR_MAX_TOKENS];
-    int   n = line_split_words(copy, tok, GENERATOR_MAX_TOKENS);
-    if (n == 0) { return 0; }
+    int n = line_split_words(copy, tok, GENERATOR_MAX_TOKENS);
+    if (n == 0)
+    {
+        return 0;
+    }
 
     unsigned acc = 0u;
     for (int i = 0; (i < n) && (i < GENERATOR_MAX_TOKENS); i++)
     {
         unsigned flag = field_flag_from_word(tok[i]);
-        if (flag == 0u) { return 0; }
+        if (flag == 0u)
+        {
+            return 0;
+        }
         acc |= flag;
     }
 

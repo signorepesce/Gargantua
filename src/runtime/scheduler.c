@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #define _DARWIN_C_SOURCE
+#include "framework_internal.h"
 #include "scheduler.h"
 #include "arena.h"
 #include "db.h"
@@ -29,12 +30,18 @@ static pthread_cond_t sleep_wake = PTHREAD_COND_INITIALIZER;
 static int scheduler_wait(long milliseconds)
 {
     struct timespec deadline;
-    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) { return -1; }
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+    {
+        return -1;
+    }
     deadline.tv_sec += (time_t)(milliseconds / 1000L);
     deadline.tv_nsec += (milliseconds % 1000L) * 1000000L;
     deadline.tv_sec += deadline.tv_nsec / 1000000000L;
     deadline.tv_nsec %= 1000000000L;
-    if (pthread_mutex_lock(&sleep_lock) != 0) { return -1; }
+    if (pthread_mutex_lock(&sleep_lock) != 0)
+    {
+        return -1;
+    }
     int result = 0;
     while (scheduler_stopping == 0)
     {
@@ -44,9 +51,11 @@ static int scheduler_wait(long milliseconds)
             result = -1;
             break;
         }
-        long left = (long)(deadline.tv_sec - now.tv_sec) * 1000L +
-                    (deadline.tv_nsec - now.tv_nsec) / 1000000L;
-        if (left <= 0L) { break; }
+        long left = (long)(deadline.tv_sec - now.tv_sec) * 1000L + (deadline.tv_nsec - now.tv_nsec) / 1000000L;
+        if (left <= 0L)
+        {
+            break;
+        }
         struct timespec wait = {0, ((left < 100L) ? left : 100L) * 1000000L};
 #ifdef __APPLE__
         int status = pthread_cond_timedwait_relative_np(&sleep_wake, &sleep_lock, &wait);
@@ -68,7 +77,10 @@ static int scheduler_wait(long milliseconds)
             break;
         }
     }
-    if (scheduler_stopping != 0) { result = -1; }
+    if (scheduler_stopping != 0)
+    {
+        result = -1;
+    }
     (void)pthread_mutex_unlock(&sleep_lock);
     return result;
 }
@@ -82,7 +94,10 @@ static int scheduler_run_task(TaskRunner *runner)
     response_reset();
     request_fail_reset();
     int result = dispatch_task(runner->task->body);
-    if (result != 0) { log_write("warn", "task '%s' failed: %s", runner->task->name, request_fail_message()); }
+    if (result != 0)
+    {
+        log_write("warn", "task '%s' failed: %s", runner->task->name, request_fail_message());
+    }
     arena_bind(NULL);
     request_fail_reset();
     response_reset();
@@ -103,29 +118,48 @@ static void *scheduler_run_repeatedly(void *argument)
     while (scheduler_stopping == 0)
     {
         (void)scheduler_run_task(runner);
-        if (scheduler_wait(runner->task->interval_ms) != 0) { break; }
+        if (scheduler_wait(runner->task->interval_ms) != 0)
+        {
+            break;
+        }
     }
     return NULL;
 }
 
 static int scheduler_prepare(const Task *tasks, int count)
 {
-    if ((count < 0) || (count > SCHEDULER_MAX_TASKS) || ((count > 0) && (tasks == NULL))) { return -1; }
+    if ((count < 0) || (count > SCHEDULER_MAX_TASKS) || ((count > 0) && (tasks == NULL)))
+    {
+        return -1;
+    }
     for (int i = 0; i < count; i++)
     {
-        if ((tasks[i].body == NULL) || (tasks[i].name == NULL) || (tasks[i].interval_ms < 0L) || (tasks[i].interval_ms > 86400000L) || ((tasks[i].interval_ms > 0L) && (tasks[i].interval_ms < 100L))) { return -1; }
+        if ((tasks[i].body == NULL) || (tasks[i].name == NULL) || (tasks[i].interval_ms < 0L) ||
+            (tasks[i].interval_ms > 86400000L) || ((tasks[i].interval_ms > 0L) && (tasks[i].interval_ms < 100L)))
+        {
+            return -1;
+        }
         task_runners[i].task = &tasks[i];
-        if (arena_init(&task_runners[i].arena, (size_t)SCHEDULER_ARENA) != 0) { return -1; }
+        if (arena_init(&task_runners[i].arena, (size_t)SCHEDULER_ARENA) != 0)
+        {
+            return -1;
+        }
     }
     return 0;
 }
 
-int scheduler_start(void)
+int scheduler_startup(void)
 {
-    if (scheduler_running != 0) { return -1; }
+    if (scheduler_running != 0)
+    {
+        return -1;
+    }
     const Task *tasks = task_table();
     int count = task_count();
-    if (scheduler_prepare(tasks, count) != 0) { return -1; }
+    if (scheduler_prepare(tasks, count) != 0)
+    {
+        return -1;
+    }
     scheduler_running = 1;
     scheduler_stopping = 0;
     for (int i = 0; i < count; i++)
@@ -136,9 +170,27 @@ int scheduler_start(void)
             return -1;
         }
     }
+    return 0;
+}
+
+int scheduler_start(void)
+{
+    if (!scheduler_running && scheduler_startup() != 0)
+    {
+        return -1;
+    }
+    if (started_threads != 0)
+    {
+        return -1;
+    }
+    const Task *tasks = task_table();
+    int count = task_count();
     for (int i = 0; i < count; i++)
     {
-        if (tasks[i].interval_ms == 0L) { continue; }
+        if (tasks[i].interval_ms == 0L)
+        {
+            continue;
+        }
         if (pthread_create(&task_threads[started_threads], NULL, scheduler_run_repeatedly, &task_runners[i]) != 0)
         {
             scheduler_stop();
@@ -151,11 +203,21 @@ int scheduler_start(void)
 
 void scheduler_stop(void)
 {
-    if (pthread_mutex_lock(&sleep_lock) != 0) { return; }
+    if (pthread_mutex_lock(&sleep_lock) != 0)
+    {
+        return;
+    }
     scheduler_stopping = 1;
     (void)pthread_cond_broadcast(&sleep_wake);
     (void)pthread_mutex_unlock(&sleep_lock);
-    for (int i = 0; i < started_threads; i++) { (void)pthread_join(task_threads[i], NULL); }
+    for (int i = 0; i < started_threads; i++)
+    {
+        (void)pthread_join(task_threads[i], NULL);
+    }
     started_threads = 0;
+    for (int i = 0; i < SCHEDULER_MAX_TASKS; i++)
+    {
+        arena_free(&task_runners[i].arena);
+    }
     scheduler_running = 0;
 }

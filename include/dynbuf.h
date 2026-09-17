@@ -4,17 +4,17 @@
 #include <stddef.h>
 
 #define DYNBUF_MIN_CHUNK 8192u
-#define DYNBUF_MMAP_MIN  (256u * 1024u)
+#define DYNBUF_MMAP_MIN (256u * 1024u)
 
 typedef struct
 {
-    char  *data;
+    char *data;
     size_t len;
     size_t cap;
     size_t max;
     size_t bytes;
-    int    mapped;
-    int    truncated;
+    int mapped;
+    int truncated;
 } DynBuf;
 
 int dynbuf_init(DynBuf *b, size_t max);

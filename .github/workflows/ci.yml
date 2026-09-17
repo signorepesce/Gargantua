@@ -18,6 +18,10 @@ jobs:
         run: ./eat test
       - name: Build
         run: ./eat build
+      - name: Installation
+        run: python3 tests/installation.py
+      - name: Load
+        run: python3 tests/load.py --seconds 5 --output "$RUNNER_TEMP/load.json"
 
   macos:
     name: tests and build (clang)
@@ -28,6 +32,10 @@ jobs:
         run: ./eat test
       - name: Build
         run: ./eat build
+      - name: Installation
+        run: python3 tests/installation.py
+      - name: Load
+        run: python3 tests/load.py --seconds 5 --output "$RUNNER_TEMP/load.json"
 
   musl:
     name: static build (gcc / musl)
@@ -35,7 +43,7 @@ jobs:
     container: alpine:3.18
     steps:
       - name: Install toolchain
-        run: apk add --no-cache gcc musl-dev bash sqlite-static sqlite-dev tar
+        run: apk add --no-cache gcc musl-dev bash sqlite-static sqlite-dev tar python3
       - uses: actions/checkout@v5
       - name: Unit tests
         run: ./eat test
@@ -44,101 +52,24 @@ jobs:
           EXTRA_CFLAGS="-static -Os" EXTRA_LDFLAGS="-Wl,--gc-sections -s" ./eat build
           ls -la .build/server
 
-  integration:
-    name: integration (end to end)
+  sanitizers:
+    name: address and undefined behavior sanitizers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev curl
-      - name: Write an application that uses the database
-        run: |
-          mkdir -p itapp
-          cat > itapp/Note.c <<'C'
-          #include <gargantua.h>
-
-          $table(Note)
-          {
-              $id       int id;
-              $not_null str title;
-              str body;
-          };
-          C
-          cat > itapp/note_controller.c <<'C'
-          #include <gargantua.h>
-
-          $on_start
-          void note_setup(void)
-          {
-              (void)Note_create_table();
-          }
-
-          $post("/notes")
-          Note note_create(Note body)
-          {
-              body.id = Note_insert(body);
-              return body;
-          }
-
-          $get("/notes/{id}")
-          Note note_show(int id)
-          {
-              return Note_find(id);
-          }
-
-          $get("/notes")
-          $list(Note) note_index(void)
-          {
-              return Note_list(50);
-          }
-          C
-          cat > itapp/application.properties <<'P'
-          server.port     = 8100
-          server.address  = 127.0.0.1
-          server.workers  = 4
-          database.url    = it.db
-          static.root     =
-          templates.root  =
-          P
-      - name: Build
-        run: APP=itapp ./eat build
-      - name: Run and exercise the API
-        run: |
-          ./.build/server > server.log 2>&1 &
-          up=0
-          for _ in $(seq 1 30); do
-            if curl -sf -m 2 http://127.0.0.1:8100/openapi.json >/dev/null 2>&1; then
-              up=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$up" != "1" ]; then
-            echo "server never came up; log follows:"
-            cat server.log
-            exit 1
-          fi
-          head -2 server.log
-
-          code=$(curl -s -o body.json -w '%{http_code}' -X POST \
-                 -H 'Content-Type: application/json' \
-                 -d '{"title":"ci","body":"hello"}' http://127.0.0.1:8100/notes)
-          echo "POST -> $code $(cat body.json)"
-          [ "$code" = "201" ]
-
-          code=$(curl -s -o one.json -w '%{http_code}' http://127.0.0.1:8100/notes/1)
-          echo "GET  -> $code $(cat one.json)"
-          [ "$code" = "200" ]
-
-          code=$(curl -s -o list.json -w '%{http_code}' http://127.0.0.1:8100/notes)
-          echo "LIST -> $code $(cat list.json)"
-          [ "$code" = "200" ]
-
-          code=$(curl -s -o bad.json -w '%{http_code}' -X POST \
-                 -H 'Content-Type: application/json' \
-                 -d '{"body":"no title"}' http://127.0.0.1:8100/notes)
-          echo "VALIDATION -> $code"
-          [ "$code" = "400" ]
+        run: sudo apt-get update && sudo apt-get install -y clang libsqlite3-dev python3
+      - name: Full suite with sanitizers
+        env:
+          CC: clang
+          EXTRA_CFLAGS: -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ./eat test
+      - name: Fuzz parsers
+        env:
+          CC: clang
+        run: ./tests/fuzz.sh 20
 
   image:
     name: container image

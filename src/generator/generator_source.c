@@ -21,23 +21,44 @@ static void parse_top_level_line(Generator *ctx, ParseState *st, const char *lin
     assert(ctx != NULL);
     assert(st != NULL);
 
-    if (line[0] == '\0') { return; }
-    if (parse_auth_annotation(ctx, st, line) != 0) { return; }
-    if (parse_produces_annotation(ctx, st, line) != 0) { return; }
+    if (line[0] == '\0')
+    {
+        return;
+    }
+    if (parse_transactional_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
+    if (parse_auth_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
+    if (parse_produces_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
     if (st->route_armed == 1)
     {
         parse_route(ctx, st, line);
         return;
     }
-    if (parse_store_annotation(ctx, st, line) != 0) { return; }
-    if (parse_repeat_annotation(ctx, st, line) != 0) { return; }
+    if (parse_store_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
+    if (parse_repeat_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
     if (st->task_armed == 1)
     {
         parse_task(ctx, st, line);
         return;
     }
-    if (parse_transactional_annotation(ctx, st, line) != 0) { return; }
-    if (arm_route_annotation(ctx, st, line) != 0) { return; }
+    if (arm_route_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
 
     drop_dangling_auth(ctx, st);
 
@@ -47,9 +68,15 @@ static void parse_top_level_line(Generator *ctx, ParseState *st, const char *lin
         return;
     }
 
-    if (report_removed_annotation(ctx, st, line) != 0) { return; }
+    if (report_removed_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
 
-    if ((strncmp(line, "$table", 6u) == 0) || (strncmp(line, "$json", 5u) == 0)) { open_type(ctx, st, line); }
+    if ((strncmp(line, "$table", 6u) == 0) || (strncmp(line, "$json", 5u) == 0))
+    {
+        open_type(ctx, st, line);
+    }
 }
 
 static void handle_close(Generator *ctx, ParseState *st, char *line)
@@ -71,62 +98,121 @@ static void handle_close(Generator *ctx, ParseState *st, char *line)
         {
             generator_error(ctx, st->lineno, "field annotation with no field before '};'");
         }
-        if (st->current_type->field_count == 0) { generator_error(ctx, st->lineno, "the table has no fields"); }
+        if (st->current_type->field_count == 0)
+        {
+            generator_error(ctx, st->lineno, "the table has no fields");
+        }
     }
 
     st->in_struct = 0;
     st->need_open = 0;
-    st->current_type       = NULL;
-    st->pending   = 0u;
+    st->current_type = NULL;
+    st->pending = 0u;
 }
 
 static int rule_annotation(Generator *ctx, ParseState *st, const char *line)
 {
     unsigned flag = 0u;
     const char *args = NULL;
-    if (strncmp(line, "$min(", 5u) == 0) { flag = 1u; args = line + 5; }
-    else if (strncmp(line, "$max(", 5u) == 0) { flag = 2u; args = line + 5; }
-    else if (strncmp(line, "$size(", 6u) == 0) { flag = 4u; args = line + 6; }
-    else if (strcmp(line, "$email") == 0) { flag = 8u; }
-    else { return 0; }
+    if (strncmp(line, "$min(", 5u) == 0)
+    {
+        flag = 1u;
+        args = line + 5;
+    }
+    else if (strncmp(line, "$max(", 5u) == 0)
+    {
+        flag = 2u;
+        args = line + 5;
+    }
+    else if (strncmp(line, "$size(", 6u) == 0)
+    {
+        flag = 4u;
+        args = line + 6;
+    }
+    else if (strcmp(line, "$email") == 0)
+    {
+        flag = 8u;
+    }
+    else
+    {
+        return 0;
+    }
     int invalid = (st->rules.validation & flag) != 0u;
     if (args != NULL)
     {
         char *end = NULL;
         errno = 0;
         long double value = strtold(args, &end);
-        if (errno || end == args || !isfinite(value)) { invalid = 1; }
+        if (errno || end == args || !isfinite(value))
+        {
+            invalid = 1;
+        }
         if (flag == 1u || flag == 2u)
         {
             size_t n = (size_t)(end - args);
-            if (n >= GENERATOR_MAX_NAME) { invalid = 1; }
+            if (n >= GENERATOR_MAX_NAME)
+            {
+                invalid = 1;
+            }
             else
             {
                 char *target = flag == 1u ? st->rules.min_arg : st->rules.max_arg;
-                memcpy(target, args, n); target[n] = '\0';
+                memcpy(target, args, n);
+                target[n] = '\0';
             }
         }
-        while (*end == ' ' || *end == '\t') { end++; }
+        while (*end == ' ' || *end == '\t')
+        {
+            end++;
+        }
         if (flag == 4u)
         {
-            if (*end != ',') { invalid = 1; }
+            if (*end != ',')
+            {
+                invalid = 1;
+            }
             else
             {
                 const char *second = end + 1;
                 errno = 0;
                 long double max = strtold(second, &end);
-                if (errno || end == second || !isfinite(max) || value < 0 || max < value || max > 1048576 || value != (unsigned)value || max != (unsigned)max)
-                { invalid = 1; }
-                if (!invalid) { st->rules.size_min = (unsigned)value; st->rules.size_max = (unsigned)max; }
-                while (*end == ' ' || *end == '\t') { end++; }
+                if (errno || end == second || !isfinite(value) || !isfinite(max) || value < 0 || max < value ||
+                    max > 1048576 || value != (unsigned)value || max != (unsigned)max)
+                {
+                    invalid = 1;
+                }
+                if (!invalid)
+                {
+                    st->rules.size_min = (unsigned)value;
+                    st->rules.size_max = (unsigned)max;
+                }
+                while (*end == ' ' || *end == '\t')
+                {
+                    end++;
+                }
             }
         }
-        else if (flag == 1u) { st->rules.min = value; }
-        else { st->rules.max = value; }
-        if (*end != ')' || end[1] != '\0') { invalid = 1; }
+        else if (flag == 1u)
+        {
+            st->rules.min = value;
+        }
+        else
+        {
+            st->rules.max = value;
+        }
+        if (*end != ')' || end[1] != '\0')
+        {
+            invalid = 1;
+        }
     }
-    if (invalid) { generator_error(ctx, st->lineno, "invalid or duplicate validation annotation: %s", line); }
-    else { st->rules.validation |= flag; }
+    if (invalid)
+    {
+        generator_error(ctx, st->lineno, "invalid or duplicate validation annotation: %s", line);
+    }
+    else
+    {
+        st->rules.validation |= flag;
+    }
     return 1;
 }
 
@@ -135,7 +221,10 @@ static int parse_references_annotation(Generator *ctx, ParseState *st, char *lin
     assert(ctx != NULL);
     assert(st != NULL);
 
-    if (strncmp(line, "$references(", 12u) != 0) { return 0; }
+    if (strncmp(line, "$references(", 12u) != 0)
+    {
+        return 0;
+    }
 
     size_t n = strlen(line);
     if ((n < 14u) || (line[n - 1u] != ')') || ((n - 13u) >= GENERATOR_MAX_NAME) || (st->pending_references[0] != '\0'))
@@ -161,12 +250,12 @@ static void apply_pending_rules(ParsedField *f, ParseState *st)
     assert(f != NULL);
     assert(st != NULL);
 
-    f->flags     |= st->pending;
+    f->flags |= st->pending;
     f->validation = st->rules.validation;
-    f->min        = st->rules.min;
-    f->max        = st->rules.max;
-    f->size_min   = st->rules.size_min;
-    f->size_max   = st->rules.size_max;
+    f->min = st->rules.min;
+    f->max = st->rules.max;
+    f->size_min = st->rules.size_min;
+    f->size_max = st->rules.size_max;
 
     memcpy(f->min_arg, st->rules.min_arg, sizeof(f->min_arg));
     memcpy(f->max_arg, st->rules.max_arg, sizeof(f->max_arg));
@@ -180,20 +269,37 @@ static void check_integral_bounds(Generator *ctx, ParseState *st, ParsedField *f
 
     for (unsigned rule = 1u; rule <= 2u; rule++)
     {
-        if ((f->validation & rule) == 0u) { continue; }
+        if ((f->validation & rule) == 0u)
+        {
+            continue;
+        }
 
         const char *arg = (rule == 1u) ? f->min_arg : f->max_arg;
-        char       *end = NULL;
+        char *end = NULL;
 
         errno = 0;
         long bound = strtol(arg, &end, 10);
 
-        if ((errno != 0) || (end == arg) || (*end != '\0') || ((strcmp(f->kind, "FIELD_INT") == 0) && ((bound < INT_MIN) || (bound > INT_MAX)))) { generator_error(ctx, st->lineno, "integer validation needs a decimal integer within the field type range"); }
+        if ((errno != 0) || (end == arg) || (*end != '\0') ||
+            ((strcmp(f->kind, "FIELD_INT") == 0) && ((bound < INT_MIN) || (bound > INT_MAX))))
+        {
+            generator_error(ctx, st->lineno, "integer validation needs a decimal integer within the field type range");
+        }
 
-        if (rule == 1u) { f->min_int = bound; } else { f->max_int = bound; }
+        if (rule == 1u)
+        {
+            f->min_int = bound;
+        }
+        else
+        {
+            f->max_int = bound;
+        }
     }
 
-    if (((f->validation & 3u) == 3u) && (f->min_int > f->max_int)) { generator_error(ctx, st->lineno, "Min exceeds Max"); }
+    if (((f->validation & 3u) == 3u) && (f->min_int > f->max_int))
+    {
+        generator_error(ctx, st->lineno, "Min exceeds Max");
+    }
 }
 
 static void check_validation(Generator *ctx, ParseState *st, ParsedField *f)
@@ -201,14 +307,17 @@ static void check_validation(Generator *ctx, ParseState *st, ParsedField *f)
     assert(ctx != NULL);
     assert(f != NULL);
 
-    int numeric = (strcmp(f->kind, "FIELD_INT") == 0) ||
-                  (strcmp(f->kind, "FIELD_LONG") == 0) ||
+    int numeric = (strcmp(f->kind, "FIELD_INT") == 0) || (strcmp(f->kind, "FIELD_LONG") == 0) ||
                   (strcmp(f->kind, "FIELD_DOUBLE") == 0);
 
-    if ((((f->validation & 3u) != 0u) && (numeric == 0)) || (((f->validation & 12u) != 0u) && (strcmp(f->kind, "FIELD_STR") != 0)) || (((f->validation & 3u) == 3u) && (f->min > f->max))) { generator_error(ctx, st->lineno, "validation does not match field type or Min exceeds Max"); }
+    if ((((f->validation & 3u) != 0u) && (numeric == 0)) ||
+        (((f->validation & 12u) != 0u) && (strcmp(f->kind, "FIELD_STR") != 0)) ||
+        (((f->validation & 3u) == 3u) && (f->min > f->max)))
+    {
+        generator_error(ctx, st->lineno, "validation does not match field type or Min exceeds Max");
+    }
 
-    int integral = (strcmp(f->kind, "FIELD_INT") == 0) ||
-                   (strcmp(f->kind, "FIELD_LONG") == 0);
+    int integral = (strcmp(f->kind, "FIELD_INT") == 0) || (strcmp(f->kind, "FIELD_LONG") == 0);
 
     if (integral != 0)
     {
@@ -216,7 +325,11 @@ static void check_validation(Generator *ctx, ParseState *st, ParsedField *f)
         return;
     }
 
-    if ((((f->validation & 1u) != 0u) && ((f->min < -DBL_MAX) || (f->min > DBL_MAX))) || (((f->validation & 2u) != 0u) && ((f->max < -DBL_MAX) || (f->max > DBL_MAX)))) { generator_error(ctx, st->lineno, "validation bound is outside the field type range"); }
+    if ((((f->validation & 1u) != 0u) && ((f->min < -DBL_MAX) || (f->min > DBL_MAX))) ||
+        (((f->validation & 2u) != 0u) && ((f->max < -DBL_MAX) || (f->max > DBL_MAX))))
+    {
+        generator_error(ctx, st->lineno, "validation bound is outside the field type range");
+    }
 }
 
 static int field_conflicts(Generator *ctx, ParseState *st, const ParsedField *f)
@@ -225,7 +338,7 @@ static int field_conflicts(Generator *ctx, ParseState *st, const ParsedField *f)
     assert(st != NULL);
     assert(f != NULL);
 
-    if (((f->flags & 1u) != 0u) && (strcmp(f->c_type, "int") != 0))
+    if (((f->flags & 1u) != 0u) && ((strcmp(f->c_type, "int") != 0) || (f->flags & 8u)))
     {
         generator_error(ctx, st->lineno, "$id must be int for a safe auto-id");
         return 1;
@@ -258,7 +371,10 @@ static int field_line_ready(Generator *ctx, ParseState *st, char *line)
     size_t len = strlen(line);
     if ((len == 0u) || (line[len - 1u] != ';'))
     {
-        if (line_only_annotations(line, &st->pending) == 0) { generator_error(ctx, st->lineno, "missing ';' at the end of the field"); }
+        if (line_only_annotations(line, &st->pending) == 0)
+        {
+            generator_error(ctx, st->lineno, "missing ';' at the end of the field");
+        }
         return 0;
     }
 
@@ -284,9 +400,22 @@ static void parse_type_body_line(Generator *ctx, ParseState *st, char *line)
     assert(ctx != NULL);
     assert(st != NULL);
 
-    if (rule_annotation(ctx, st, line)) { return; }
-    if (parse_references_annotation(ctx, st, line) != 0) { return; }
-    if (field_line_ready(ctx, st, line) == 0) { return; }
+    if (parse_pick(ctx, st, line))
+    {
+        return;
+    }
+    if (rule_annotation(ctx, st, line))
+    {
+        return;
+    }
+    if (parse_references_annotation(ctx, st, line) != 0)
+    {
+        return;
+    }
+    if (field_line_ready(ctx, st, line) == 0)
+    {
+        return;
+    }
 
     ParsedField f;
     if (parse_field(ctx, line, st->lineno, &f) == 1)
@@ -310,6 +439,45 @@ static void parse_type_body_line(Generator *ctx, ParseState *st, char *line)
     st->pending = 0u;
 }
 
+static void collect_function(Generator *ctx, const ParseState *st, const char *line)
+{
+    if (st->brace_depth != 0 || line[0] == '#' || line[0] == '\0' ||
+        (line[0] == '$' && strncmp(line, "$list(", 6u) && strncmp(line, "$page(", 6u)) ||
+        strncmp(line, "static ", 7u) == 0 || strncmp(line, "extern ", 7u) == 0 || strchr(line, ';') ||
+        strchr(line, '=') || strchr(line, '{'))
+    {
+        return;
+    }
+    const char *close = strrchr(line, ')');
+    if (close == NULL || close[1] != '\0')
+    {
+        return;
+    }
+    ParsedFunction f = {0};
+    if (extract_function_name(line, f.name, sizeof(f.name)) != 0 ||
+        extract_return_type(line, f.return_type, sizeof(f.return_type)) != 0)
+    {
+        return;
+    }
+    if (ctx->function_count >= GENERATOR_MAX_SERVICES)
+    {
+        generator_error(ctx, st->lineno, "too many public functions");
+        return;
+    }
+    for (int i = 0; i < ctx->function_count; i++)
+    {
+        if (strcmp(ctx->functions[i].name, f.name) == 0)
+        {
+            generator_error(ctx, st->lineno, "public function '%s' is defined twice", f.name);
+            return;
+        }
+    }
+    (void)snprintf(f.signature, sizeof(f.signature), "%s", line);
+    f.file_index = ctx->file_count - 1;
+    f.line = st->lineno;
+    ctx->functions[ctx->function_count++] = f;
+}
+
 static void parse_source_line(Generator *ctx, ParseState *st, char *line)
 {
     assert(ctx != NULL);
@@ -318,12 +486,16 @@ static void parse_source_line(Generator *ctx, ParseState *st, char *line)
 
     if (st->in_struct == 0)
     {
+        collect_function(ctx, st, line);
         guard_transaction(ctx, st, line);
         parse_top_level_line(ctx, st, line);
         return;
     }
 
-    if (line[0] == '\0') { return; }
+    if (line[0] == '\0')
+    {
+        return;
+    }
 
     if (st->need_open != 0)
     {
@@ -349,17 +521,58 @@ static void report_unfinished(Generator *ctx, const ParseState *st, int truncate
     assert(ctx != NULL);
     assert(st != NULL);
 
-    if (truncated != 0) { generator_error(ctx, st->lineno, "the file exceeds %d lines", GENERATOR_MAX_LINES); }
-    if (st->in_block_comment != 0) { generator_error(ctx, st->lineno, "the block comment was not closed"); }
-    if (st->route_armed != 0) { generator_error(ctx, st->lineno, "the handler signature after the route annotation is missing"); }
-    if (st->pending_auth || st->pending_public || st->pending_role[0]) { generator_error(ctx, st->lineno, "authentication annotation without endpoint"); }
-    if (st->pending_produces[0] != '\0') { generator_error(ctx, st->lineno, "$produces is not followed by a route"); }
-    if (st->task_armed != 0) { generator_error(ctx, st->lineno, "$repeat/$on_start is not followed by a function"); }
-    if (st->pending_transactional == 1) { generator_error(ctx, st->lineno, "$transactional at the end of the file is not" " followed by a service or an endpoint"); }
+    if (truncated != 0)
+    {
+        generator_error(ctx, st->lineno, "the file exceeds %d lines", GENERATOR_MAX_LINES);
+    }
+    if (st->in_block_comment != 0)
+    {
+        generator_error(ctx, st->lineno, "the block comment was not closed");
+    }
+    if (st->route_armed != 0)
+    {
+        generator_error(ctx, st->lineno, "the handler signature after the route annotation is missing");
+    }
+    if (st->pending_auth || st->pending_public || st->pending_role[0])
+    {
+        generator_error(ctx, st->lineno, "authentication annotation without endpoint");
+    }
+    if (st->pending_produces[0] != '\0')
+    {
+        generator_error(ctx, st->lineno, "$produces is not followed by a route");
+    }
+    if (st->task_armed != 0)
+    {
+        generator_error(ctx, st->lineno, "$repeat/$on_start is not followed by a function");
+    }
+    if (st->pending_transactional == 1)
+    {
+        generator_error(ctx, st->lineno,
+                        "$transactional at the end of the file is not"
+                        " followed by a service or an endpoint");
+    }
     if (st->in_struct == 1)
     {
-        generator_error(ctx, st->lineno, (st->need_open != 0) ? "the table's '{' is missing" : "the table was not closed with '};'");
+        generator_error(ctx, st->lineno,
+                        (st->need_open != 0) ? "the table's '{' is missing" : "the table was not closed with '};'");
     }
+}
+
+static int signature_balance(const char *text)
+{
+    int depth = 0;
+    for (size_t i = 0u; text[i] != '\0'; i++)
+    {
+        if (text[i] == '(')
+        {
+            depth++;
+        }
+        if (text[i] == ')')
+        {
+            depth--;
+        }
+    }
+    return depth;
 }
 
 void generator_parse_source(Generator *ctx, char *src, size_t len)
@@ -377,14 +590,19 @@ void generator_parse_source(Generator *ctx, char *src, size_t len)
     ParseState st;
     memset(&st, 0, sizeof(st));
 
+    char signature[GENERATOR_MAX_LINE] = {0};
+    int signature_line = 0;
     char *p = src;
     for (int i = 0; i < GENERATOR_MAX_LINES; i++)
     {
-        if (*p == '\0') { break; }
+        if (*p == '\0')
+        {
+            break;
+        }
 
-        char  *start = p;
-        char  *eol   = strchr(p, '\n');
-        size_t n     = (eol != NULL) ? (size_t)(eol - p) : strlen(p);
+        char *start = p;
+        char *eol = strchr(p, '\n');
+        size_t n = (eol != NULL) ? (size_t)(eol - p) : strlen(p);
 
         st.lineno++;
         p = (eol != NULL) ? (eol + 1) : (p + n);
@@ -400,8 +618,47 @@ void generator_parse_source(Generator *ctx, char *src, size_t len)
         work[n] = '\0';
 
         strip_comments(work, &st.in_block_comment);
-        parse_source_line(ctx, &st, line_trim(work));
+        char *line = line_trim(work);
+        int candidate = !st.in_struct && st.brace_depth == 0 && line[0] != '#' &&
+                        (line[0] != '$' || strncmp(line, "$list(", 6u) == 0 || strncmp(line, "$page(", 6u) == 0) &&
+                        strchr(line, '(') != NULL && strchr(line, '=') == NULL && strchr(line, ';') == NULL &&
+                        strchr(line, '{') == NULL;
+        if (signature[0] || (candidate && signature_balance(line) > 0))
+        {
+            size_t used = strlen(signature);
+            size_t extra = strlen(line);
+            if (extra + 1u >= sizeof(signature) - used)
+            {
+                generator_error(ctx, st.lineno, "function signature exceeds %d bytes", GENERATOR_MAX_LINE - 1);
+                signature[0] = '\0';
+                continue;
+            }
+            if (!used)
+            {
+                signature_line = st.lineno;
+            }
+            else
+            {
+                signature[used++] = ' ';
+            }
+            memcpy(signature + used, line, extra + 1u);
+            if (signature_balance(signature) > 0)
+            {
+                continue;
+            }
+            int physical_line = st.lineno;
+            st.lineno = signature_line;
+            parse_source_line(ctx, &st, signature);
+            st.lineno = physical_line;
+            signature[0] = '\0';
+            continue;
+        }
+        parse_source_line(ctx, &st, line);
     }
 
+    if (signature[0])
+    {
+        generator_error(ctx, signature_line, "unfinished function signature");
+    }
     report_unfinished(ctx, &st, (*p != '\0') ? 1 : 0);
 }

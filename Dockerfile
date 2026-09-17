@@ -6,9 +6,13 @@ RUN --mount=type=cache,target=/var/cache/apk apk add \
     binutils \
     upx \
     sqlite-static \
-    sqlite-dev
+    sqlite-dev \
+    python3
 WORKDIR /app
 COPY eat ./
+COPY tools/ tools/
+COPY LICENSE ./LICENSE
+COPY examples/ examples/
 COPY src/ src/
 COPY include/ include/
 COPY app/ app/

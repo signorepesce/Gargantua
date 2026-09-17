@@ -13,12 +13,12 @@ typedef struct
     const char *method;
     const char *url;
     const char *content_type;
-    int         status;
-    RouteHandler     handler;
+    int status;
+    RouteHandler handler;
 } Route;
 
 const Route *route_table(void);
-int            route_count(void);
+int route_count(void);
 
 const Route *route_find(const char *method, const char *url, RequestParams *out);
 

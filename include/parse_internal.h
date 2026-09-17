@@ -5,27 +5,28 @@
 
 typedef struct
 {
-    int      lineno;
-    int      in_struct;
-    int      need_open;
-    int      in_block_comment;
+    int lineno;
+    int in_struct;
+    int need_open;
+    int in_block_comment;
     unsigned pending;
     ParsedField rules;
     char pending_references[GENERATOR_MAX_NAME];
     ParsedType *current_type;
-    int      route_armed;
-    int      pending_transactional;
-    int      pending_auth;
-    int      pending_public;
-    char     pending_role[GENERATOR_MAX_NAME];
-    int      brace_depth;
-    int      task_armed;
-    long     pending_interval_ms;
-    char     pending_produces[GENERATOR_MAX_CONTENT_TYPE];
-    int      transaction_block_armed;
-    int      transaction_depth;
-    char     route_method[GENERATOR_MAX_METHOD];
-    char     route_url[GENERATOR_MAX_URL];
+    int route_armed;
+    int pending_transactional;
+    int pending_auth;
+    int pending_public;
+    char pending_role[GENERATOR_MAX_NAME];
+    int brace_depth;
+    int task_armed;
+    long pending_interval_ms;
+    char pending_produces[GENERATOR_MAX_CONTENT_TYPE];
+    int transaction_block_armed;
+    int transaction_depths[16];
+    int transaction_count;
+    char route_method[GENERATOR_MAX_METHOD];
+    char route_url[GENERATOR_MAX_URL];
 } ParseState;
 
 int count_url_params(const char *url);
@@ -45,6 +46,11 @@ void guard_transaction(Generator *ctx, ParseState *st, const char *line);
 int is_safe_identifier(const char *name);
 
 int line_only_annotations(const char *line, unsigned *flags);
+
+int parse_pick(Generator *ctx, ParseState *st, char *line);
+void resolve_picks(Generator *ctx);
+int emit_model_file(FILE *out, const Generator *ctx, int file_index);
+void emit_projection(FILE *out, const ParsedType *type);
 
 void open_type(Generator *ctx, ParseState *st, const char *line);
 

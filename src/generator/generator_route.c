@@ -22,7 +22,10 @@ static const char *signature_open_paren(const char *line)
     if (strncmp(line, "$list(", 6u) == 0 || strncmp(line, "$page(", 6u) == 0)
     {
         const char *close = strchr(line, ')');
-        if (close == NULL) { return NULL; }
+        if (close == NULL)
+        {
+            return NULL;
+        }
         start = close + 1;
     }
     return strchr(start, '(');
@@ -35,13 +38,19 @@ int extract_function_name(const char *line, char *out, size_t cap)
     assert(cap > 1u);
 
     const char *paren = signature_open_paren(line);
-    if (paren == NULL) { return -1; }
+    if (paren == NULL)
+    {
+        return -1;
+    }
 
     const char *end = paren;
     int guard = 0;
     while ((end > line) && (guard < GENERATOR_MAX_LINE))
     {
-        if (isspace((unsigned char)*(end - 1)) == 0) { break; }
+        if (isspace((unsigned char)*(end - 1)) == 0)
+        {
+            break;
+        }
         end--;
         guard++;
     }
@@ -51,13 +60,19 @@ int extract_function_name(const char *line, char *out, size_t cap)
     while ((start > line) && (guard < GENERATOR_MAX_LINE))
     {
         char c = *(start - 1);
-        if ((isalnum((unsigned char)c) == 0) && (c != '_')) { break; }
+        if ((isalnum((unsigned char)c) == 0) && (c != '_'))
+        {
+            break;
+        }
         start--;
         guard++;
     }
 
     size_t n = (size_t)(end - start);
-    if ((n == 0u) || (n >= cap)) { return -1; }
+    if ((n == 0u) || (n >= cap))
+    {
+        return -1;
+    }
 
     memcpy(out, start, n);
     out[n] = '\0';
@@ -71,27 +86,46 @@ int extract_return_type(const char *line, char *out, size_t cap)
     assert(cap > 1u);
 
     const char *paren = signature_open_paren(line);
-    if (paren == NULL) { return -1; }
+    if (paren == NULL)
+    {
+        return -1;
+    }
 
+    while (paren > line && isspace((unsigned char)paren[-1]))
+    {
+        paren--;
+    }
     const char *start = paren;
     int guard = 0;
     while ((start > line) && (guard < GENERATOR_MAX_LINE))
     {
         char c = *(start - 1);
-        if ((isalnum((unsigned char)c) == 0) && (c != '_')) { break; }
+        if ((isalnum((unsigned char)c) == 0) && (c != '_'))
+        {
+            break;
+        }
         start--;
         guard++;
     }
 
     char work[GENERATOR_MAX_LINE];
     size_t n = (size_t)(start - line);
-    if (n >= sizeof(work)) { return -1; }
+    if (n >= sizeof(work))
+    {
+        return -1;
+    }
     memcpy(work, line, n);
     work[n] = '\0';
 
     char *t = line_trim(work);
-    if ((t[0] == '\0') || (strlen(t) >= cap)) { return -1; }
-    if (strchr(t, '*') != NULL) { return -1; }
+    if ((t[0] == '\0') || (strlen(t) >= cap))
+    {
+        return -1;
+    }
+    if (strchr(t, '*') != NULL)
+    {
+        return -1;
+    }
 
     (void)snprintf(out, cap, "%s", t);
     return 0;
@@ -102,12 +136,18 @@ static int signature_inner(const char *line, char *inner, size_t cap)
     assert(line != NULL);
     assert(inner != NULL);
 
-    const char *open  = signature_open_paren(line);
+    const char *open = signature_open_paren(line);
     const char *close = (open != NULL) ? strrchr(line, ')') : NULL;
-    if ((open == NULL) || (close == NULL) || (close < open)) { return -1; }
+    if ((open == NULL) || (close == NULL) || (close < open))
+    {
+        return -1;
+    }
 
     size_t n = (size_t)(close - open) - 1u;
-    if (n >= cap) { return -1; }
+    if (n >= cap)
+    {
+        return -1;
+    }
 
     memcpy(inner, open + 1, n);
     inner[n] = '\0';
@@ -119,7 +159,12 @@ static int param_type_allowed(const char *type, int service)
 {
     assert(type != NULL);
 
-    return ((word_equals(type, "int") == 1) || (word_equals(type, "str") == 1) || (service && ((word_equals(type, "long") == 1) || (word_equals(type, "double") == 1) || (word_equals(type, "bool") == 1))) || (is_safe_identifier(type) != 0)) ? 1 : 0;
+    return ((word_equals(type, "int") == 1) || (word_equals(type, "str") == 1) ||
+            (service && ((word_equals(type, "long") == 1) || (word_equals(type, "double") == 1) ||
+                         (word_equals(type, "bool") == 1))) ||
+            (is_safe_identifier(type) != 0))
+               ? 1
+               : 0;
 }
 
 static int take_param(Generator *ctx, ParseState *st, ParsedRoute *r, int slot, char *text, int service)
@@ -167,7 +212,10 @@ int extract_params(Generator *ctx, ParseState *st, const char *line, ParsedRoute
     assert(r != NULL);
 
     char inner[GENERATOR_MAX_LINE];
-    if (signature_inner(line, inner, sizeof(inner)) != 0) { return -1; }
+    if (signature_inner(line, inner, sizeof(inner)) != 0)
+    {
+        return -1;
+    }
 
     char *body = line_trim(inner);
     if ((body[0] == '\0') || (word_equals(body, "void") == 1))
@@ -176,15 +224,21 @@ int extract_params(Generator *ctx, ParseState *st, const char *line, ParsedRoute
         return 0;
     }
 
-    char *save     = body;
-    int   finished = 0;
+    char *save = body;
+    int finished = 0;
 
     for (int i = 0; i < GENERATOR_MAX_PARAMS; i++)
     {
         char *comma = strchr(save, ',');
-        if (comma != NULL) { *comma = '\0'; }
+        if (comma != NULL)
+        {
+            *comma = '\0';
+        }
 
-        if (take_param(ctx, st, r, i, save, service) != 0) { return -1; }
+        if (take_param(ctx, st, r, i, save, service) != 0)
+        {
+            return -1;
+        }
 
         if (comma == NULL)
         {
@@ -219,12 +273,24 @@ static int url_param_slot(const char *url, const char *name)
     int slot = 0;
     for (size_t i = 0u; i < GENERATOR_MAX_URL && url[i] != '\0'; i++)
     {
-        if (url[i] != '{') { continue; }
+        if (url[i] != '{')
+        {
+            continue;
+        }
         size_t start = ++i;
-        while (i < GENERATOR_MAX_URL && url[i] != '\0' && url[i] != '}') { i++; }
-        if (i >= GENERATOR_MAX_URL || url[i] != '}') { return -1; }
+        while (i < GENERATOR_MAX_URL && url[i] != '\0' && url[i] != '}')
+        {
+            i++;
+        }
+        if (i >= GENERATOR_MAX_URL || url[i] != '}')
+        {
+            return -1;
+        }
         size_t len = i - start;
-        if (strlen(name) == len && memcmp(url + start, name, len) == 0) { return slot; }
+        if (strlen(name) == len && memcmp(url + start, name, len) == 0)
+        {
+            return slot;
+        }
         slot++;
     }
     return -1;
@@ -237,7 +303,10 @@ int count_url_params(const char *url)
     int n = 0;
     for (int i = 0; (i < GENERATOR_MAX_URL) && (url[i] != '\0'); i++)
     {
-        if (url[i] == '{') { n++; }
+        if (url[i] == '{')
+        {
+            n++;
+        }
     }
     return n;
 }
@@ -245,10 +314,16 @@ int count_url_params(const char *url)
 int parse_route_url(Generator *ctx, ParseState *st, const char *line, const char *word, char out[GENERATOR_MAX_URL])
 {
     const char *open = strchr(line, '(');
-    if (open == NULL) { return -1; }
+    if (open == NULL)
+    {
+        return -1;
+    }
 
     const char *p = open + 1;
-    while ((*p == ' ') || (*p == '\t')) { p++; }
+    while ((*p == ' ') || (*p == '\t'))
+    {
+        p++;
+    }
     if (*p != '"')
     {
         generator_error(ctx, st->lineno, "%s requires a quoted path", word);
@@ -282,14 +357,20 @@ int parse_route_url(Generator *ctx, ParseState *st, const char *line, const char
     out[n] = '\0';
 
     p++;
-    while ((*p == ' ') || (*p == '\t')) { p++; }
+    while ((*p == ' ') || (*p == '\t'))
+    {
+        p++;
+    }
     if (*p != ')')
     {
         generator_error(ctx, st->lineno, "close %s with ')'", word);
         return -1;
     }
     p++;
-    while ((*p == ' ') || (*p == '\t')) { p++; }
+    while ((*p == ' ') || (*p == '\t'))
+    {
+        p++;
+    }
     if (*p != '\0')
     {
         generator_error(ctx, st->lineno, "do not put other text after %s(\"...\")", word);
@@ -301,15 +382,18 @@ int parse_route_url(Generator *ctx, ParseState *st, const char *line, const char
 typedef struct
 {
     char names[GENERATOR_MAX_PARAMS][GENERATOR_MAX_NAME];
-    int  count;
+    int count;
 } Placeholders;
 
-static int validate_placeholder(Generator *ctx, ParseState *st, const char *url, const char *p, size_t n, Placeholders *seen)
+static int validate_placeholder(Generator *ctx, ParseState *st, const char *url, const char *p, size_t n,
+                                Placeholders *seen)
 {
     assert(ctx != NULL);
     assert(seen != NULL);
 
-    if ((n < 3u) || (p[n - 1u] != '}') || (memchr(p + 1, '{', n - 1u) != NULL) || (memchr(p + 1, '}', n - 2u) != NULL) || ((n - 2u) >= GENERATOR_MAX_NAME) || (seen->count >= GENERATOR_MAX_PARAMS))
+    if ((n < 3u) || (p[n - 1u] != '}') || (memchr(p + 1, '{', n - 1u) != NULL) ||
+        (memchr(p + 1, '}', n - 2u) != NULL) || ((n - 2u) >= GENERATOR_MAX_NAME) ||
+        (seen->count >= GENERATOR_MAX_PARAMS))
     {
         generator_error(ctx, st->lineno, "invalid placeholder in path '%s'", url);
         return -1;
@@ -340,7 +424,8 @@ static int validate_placeholder(Generator *ctx, ParseState *st, const char *url,
     return 0;
 }
 
-static int validate_route_segment(Generator *ctx, ParseState *st, const char *url, const char *p, size_t n, Placeholders *seen)
+static int validate_route_segment(Generator *ctx, ParseState *st, const char *url, const char *p, size_t n,
+                                  Placeholders *seen)
 {
     assert(ctx != NULL);
 
@@ -356,7 +441,10 @@ static int validate_route_segment(Generator *ctx, ParseState *st, const char *ur
         return -1;
     }
 
-    if (p[0] == '{') { return validate_placeholder(ctx, st, url, p, n, seen); }
+    if (p[0] == '{')
+    {
+        return validate_placeholder(ctx, st, url, p, n, seen);
+    }
 
     if ((memchr(p, '{', n) != NULL) || (memchr(p, '}', n) != NULL))
     {
@@ -392,11 +480,14 @@ int validate_route_url(Generator *ctx, ParseState *st, const char *url)
     assert(st != NULL);
     assert(url != NULL);
 
-    if (route_url_shape_valid(ctx, st, url) != 0) { return -1; }
+    if (route_url_shape_valid(ctx, st, url) != 0)
+    {
+        return -1;
+    }
 
-    Placeholders seen  = {0};
-    const char  *p     = url + 1;
-    int          count = 0;
+    Placeholders seen = {0};
+    const char *p = url + 1;
+    int count = 0;
 
     while (*p != '\0')
     {
@@ -407,12 +498,18 @@ int validate_route_url(Generator *ctx, ParseState *st, const char *url)
         }
 
         const char *slash = strchr(p, '/');
-        size_t      n     = (slash != NULL) ? (size_t)(slash - p) : strlen(p);
+        size_t n = (slash != NULL) ? (size_t)(slash - p) : strlen(p);
 
-        if (validate_route_segment(ctx, st, url, p, n, &seen) != 0) { return -1; }
+        if (validate_route_segment(ctx, st, url, p, n, &seen) != 0)
+        {
+            return -1;
+        }
 
         count++;
-        if (slash == NULL) { break; }
+        if (slash == NULL)
+        {
+            break;
+        }
         p = slash + 1;
     }
 
@@ -425,7 +522,10 @@ static int parse_collection_return(Generator *ctx, ParseState *st, ParsedRoute *
     assert(r != NULL);
     assert(return_type != NULL);
 
-    if ((strncmp(return_type, "$list(", 6u) != 0) && (strncmp(return_type, "$page(", 6u) != 0)) { return 0; }
+    if ((strncmp(return_type, "$list(", 6u) != 0) && (strncmp(return_type, "$page(", 6u) != 0))
+    {
+        return 0;
+    }
 
     size_t n = strlen(return_type);
     if ((n < 8u) || (return_type[n - 1u] != ')'))
@@ -455,7 +555,7 @@ static void classify_params(ParsedRoute *r, int *bodies, int *paths)
     assert(paths != NULL);
 
     *bodies = 0;
-    *paths  = 0;
+    *paths = 0;
 
     for (int k = 0; (k < r->param_count) && (k < GENERATOR_MAX_PARAMS); k++)
     {
@@ -467,7 +567,7 @@ static void classify_params(ParsedRoute *r, int *bodies, int *paths)
 
         if (url_has_param(r->url, r->params[k].name) == 1)
         {
-            r->params[k].is_query  = 0;
+            r->params[k].is_query = 0;
             r->params[k].path_slot = url_param_slot(r->url, r->params[k].name);
             (*paths)++;
         }
@@ -484,7 +584,7 @@ static int route_params_consistent(Generator *ctx, ParseState *st, ParsedRoute *
     assert(r != NULL);
 
     int bodies = 0;
-    int paths  = 0;
+    int paths = 0;
     classify_params(r, &bodies, &paths);
 
     if (bodies > 1)
@@ -496,7 +596,10 @@ static int route_params_consistent(Generator *ctx, ParseState *st, ParsedRoute *
     int wanted = count_url_params(r->url);
     if (wanted != paths)
     {
-        generator_error(ctx, st->lineno, "path '%s' has %d {…} segment(s)" " but %s takes %d with a matching name", r->url, wanted, r->function_name, paths);
+        generator_error(ctx, st->lineno,
+                        "path '%s' has %d {…} segment(s)"
+                        " but %s takes %d with a matching name",
+                        r->url, wanted, r->function_name, paths);
         return -1;
     }
 
@@ -510,22 +613,26 @@ static void take_pending_annotations(Generator *ctx, ParseState *st, ParsedRoute
     assert(r != NULL);
 
     r->authenticated = st->pending_auth;
-    r->public_route  = st->pending_public;
+    r->public_route = st->pending_public;
     (void)snprintf(r->role, sizeof(r->role), "%s", st->pending_role);
 
-    if (r->public_route && (r->authenticated || r->role[0])) { generator_error(ctx, st->lineno, "$public cannot be combined with authentication"); }
+    if (r->public_route && (r->authenticated || r->role[0]))
+    {
+        generator_error(ctx, st->lineno, "$public cannot be combined with authentication");
+    }
 
     r->transactional = st->pending_transactional;
     (void)snprintf(r->produces, sizeof(r->produces), "%s", st->pending_produces);
 
-    st->pending_produces[0]   = '\0';
-    st->pending_auth          = 0;
-    st->pending_public        = 0;
-    st->pending_role[0]       = '\0';
+    st->pending_produces[0] = '\0';
+    st->pending_auth = 0;
+    st->pending_public = 0;
+    st->pending_role[0] = '\0';
     st->pending_transactional = 0;
 }
 
-static int parse_route_signature(Generator *ctx, ParseState *st, const char *line, char *function_name, char *return_type, size_t cap)
+static int parse_route_signature(Generator *ctx, ParseState *st, const char *line, char *function_name,
+                                 char *return_type, size_t cap)
 {
     assert(ctx != NULL);
     assert(st != NULL);
@@ -540,13 +647,15 @@ static int parse_route_signature(Generator *ctx, ParseState *st, const char *lin
 
     if (extract_return_type(line, return_type, cap) != 0)
     {
-        generator_error(ctx, st->lineno, "after %s(\"%s\") expected 'type name(void)'", st->route_method, st->route_url);
+        generator_error(ctx, st->lineno, "after %s(\"%s\") expected 'type name(void)'", st->route_method,
+                        st->route_url);
         return -1;
     }
 
     if (extract_function_name(line, function_name, cap) != 0)
     {
-        generator_error(ctx, st->lineno, "after %s(\"%s\") expected a function signature", st->route_method, st->route_url);
+        generator_error(ctx, st->lineno, "after %s(\"%s\") expected a function signature", st->route_method,
+                        st->route_url);
         return -1;
     }
 
@@ -568,7 +677,10 @@ void parse_route(Generator *ctx, ParseState *st, const char *line)
 
     char function_name[GENERATOR_MAX_NAME];
     char return_type[GENERATOR_MAX_NAME];
-    if (parse_route_signature(ctx, st, line, function_name, return_type, sizeof(return_type)) != 0) { return; }
+    if (parse_route_signature(ctx, st, line, function_name, return_type, sizeof(return_type)) != 0)
+    {
+        return;
+    }
 
     ParsedRoute *r = &ctx->routes[ctx->route_count];
     memset(r, 0, sizeof(*r));
@@ -577,19 +689,31 @@ void parse_route(Generator *ctx, ParseState *st, const char *line)
     (void)snprintf(r->function_name, sizeof(r->function_name), "%s", function_name);
     (void)snprintf(r->return_type, sizeof(r->return_type), "%s", return_type);
 
-    if (parse_collection_return(ctx, st, r, return_type) != 0) { return; }
+    if (parse_collection_return(ctx, st, r, return_type) != 0)
+    {
+        return;
+    }
 
-    r->line       = st->lineno;
+    r->line = st->lineno;
     r->file_index = ctx->file_count - 1;
 
-    if (extract_params(ctx, st, line, r, 0) != 0) { return; }
-    if (route_params_consistent(ctx, st, r) != 0) { return; }
+    if (extract_params(ctx, st, line, r, 0) != 0)
+    {
+        return;
+    }
+    if (route_params_consistent(ctx, st, r) != 0)
+    {
+        return;
+    }
 
     take_pending_annotations(ctx, st, r);
 
     ctx->route_count++;
 
-    if (ctx->file_count > 0) { ctx->files[ctx->file_count - 1].has_route = 1; }
+    if (ctx->file_count > 0)
+    {
+        ctx->files[ctx->file_count - 1].has_route = 1;
+    }
 }
 
 void parse_service(Generator *ctx, ParseState *st, const char *line)
@@ -616,7 +740,8 @@ void parse_service(Generator *ctx, ParseState *st, const char *line)
     ParsedRoute temporary;
     memset(service, 0, sizeof(*service));
     memset(&temporary, 0, sizeof(temporary));
-    if (extract_return_type(line, service->return_type, sizeof(service->return_type)) != 0 || extract_function_name(line, service->function_name, sizeof(service->function_name)) != 0)
+    if (extract_return_type(line, service->return_type, sizeof(service->return_type)) != 0 ||
+        extract_function_name(line, service->function_name, sizeof(service->function_name)) != 0)
     {
         generator_error(ctx, st->lineno, "a transactional service requires a plain signature without pointers");
         st->pending_transactional = 0;
@@ -632,7 +757,10 @@ void parse_service(Generator *ctx, ParseState *st, const char *line)
     service->line = st->lineno;
     service->file_index = ctx->file_count - 1;
     ctx->service_count++;
-    if (ctx->file_count > 0) { ctx->files[ctx->file_count - 1].has_service = 1; }
+    if (ctx->file_count > 0)
+    {
+        ctx->files[ctx->file_count - 1].has_service = 1;
+    }
     st->pending_transactional = 0;
 }
 
@@ -642,36 +770,75 @@ void guard_transaction(Generator *ctx, ParseState *st, const char *line)
     assert(st != NULL);
     assert(line != NULL);
 
-    int opens  = 0;
-    int closes = 0;
-    for (int i = 0; (i < GENERATOR_MAX_LINE) && (line[i] != '\0'); i++)
+    char quote = '\0';
+    for (size_t i = 0u; line[i] != '\0' && i < GENERATOR_MAX_LINE;)
     {
-        if (line[i] == '{') { opens++; }
-        if (line[i] == '}') { closes++; }
+        char c = line[i];
+        if (quote != '\0')
+        {
+            if (c == '\\' && line[i + 1u] != '\0')
+            {
+                i += 2u;
+                continue;
+            }
+            if (c == quote)
+            {
+                quote = '\0';
+            }
+            i++;
+            continue;
+        }
+        if (c == '\"' || c == '\'')
+        {
+            quote = c;
+            i++;
+            continue;
+        }
+        if (isalpha((unsigned char)c) || c == '_' || c == '$')
+        {
+            size_t start = i++;
+            while (isalnum((unsigned char)line[i]) || line[i] == '_' || line[i] == '$')
+            {
+                i++;
+            }
+            size_t n = i - start;
+            if (n == 12u && memcmp(line + start, "$transaction", n) == 0)
+            {
+                st->transaction_block_armed = 1;
+            }
+            if (n == 6u && memcmp(line + start, "return", n) == 0 && st->transaction_count > 0)
+            {
+                generator_error(ctx, st->lineno, "do not use return inside $transaction; use $throw or $transactional");
+            }
+            continue;
+        }
+        if (c == '{')
+        {
+            st->brace_depth++;
+            if (st->transaction_block_armed)
+            {
+                if (st->transaction_count >= 16)
+                {
+                    generator_error(ctx, st->lineno, "transaction nesting exceeds 16");
+                }
+                else
+                {
+                    st->transaction_depths[st->transaction_count++] = st->brace_depth;
+                }
+                st->transaction_block_armed = 0;
+            }
+        }
+        if (c == '}')
+        {
+            if (st->transaction_count > 0 && st->transaction_depths[st->transaction_count - 1] == st->brace_depth)
+            {
+                st->transaction_count--;
+            }
+            if (st->brace_depth > 0)
+            {
+                st->brace_depth--;
+            }
+        }
+        i++;
     }
-
-    if ((st->transaction_depth > 0) && (st->brace_depth >= st->transaction_depth) && (strstr(line, "return") != NULL) && (strstr(line, "$throw") == NULL))
-    {
-        generator_error(ctx, st->lineno, "do not use return inside $transaction { }:" " the COMMIT would never run and data would be lost." " Use $throw to fail, or $transactional on the handler");
-    }
-
-    const char *found = strstr(line, "$transaction");
-    if (found != NULL)
-    {
-        char after = found[12];
-        if ((isalnum((unsigned char)after) == 0) && (after != '_')) { st->transaction_block_armed = 1; }
-    }
-
-    st->brace_depth += opens;
-
-    if ((st->transaction_block_armed == 1) && (opens > 0))
-    {
-        st->transaction_depth = st->brace_depth;
-        st->transaction_block_armed   = 0;
-    }
-
-    st->brace_depth -= closes;
-
-    if ((st->transaction_depth > 0) && (st->brace_depth < st->transaction_depth)) { st->transaction_depth = 0; }
-    if (st->brace_depth < 0) { st->brace_depth = 0; }
 }

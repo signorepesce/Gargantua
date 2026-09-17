@@ -1,0 +1,28 @@
+[Unit]
+Description=Gargantua API
+After=network.target
+
+[Service]
+Type=simple
+User=gargantua
+Group=gargantua
+WorkingDirectory=/opt/my-api
+ExecStart=/opt/my-api/.build/server
+Environment=GARGANTUA_CONFIG=/etc/gargantua/application.properties
+StateDirectory=gargantua
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillSignal=SIGTERM
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

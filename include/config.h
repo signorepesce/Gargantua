@@ -2,10 +2,10 @@
 #define CONFIG_H
 
 #define CONFIG_MAX_KEYS 64
-#define CONFIG_KEY_LEN  64
-#define CONFIG_VALUE_LEN  256
+#define CONFIG_KEY_LEN 64
+#define CONFIG_VALUE_LEN 256
 #ifndef CONFIG_FILE
-#define CONFIG_FILE     "app/application.properties"
+#define CONFIG_FILE "app/application.properties"
 #endif
 
 int config_load(const char *path);

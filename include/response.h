@@ -13,7 +13,7 @@ int response_location(const char *value);
 int response_status(int code);
 void response_reset(void);
 int response_status_get(int fallback);
-int response_write(char *out, size_t cap);
+int response_write(char *out, size_t cap, int status);
 int response_token(const char *text);
 int response_value(const char *text);
 

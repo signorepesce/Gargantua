@@ -1,0 +1,10 @@
+#include <gargantua.h>
+$transactional
+int service(void)
+{
+$transaction
+{
+$log("return");
+}
+return 1;
+}

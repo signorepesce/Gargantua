@@ -1,6 +1,53 @@
 #ifndef GARGANTUA_SERVER_INTERNAL_H
 #define GARGANTUA_SERVER_INTERNAL_H
 
+#include "server.h"
+#include "arena.h"
+#include "dynbuf.h"
+#include "http.h"
+#include "route.h"
+#include "response.h"
+#include <pthread.h>
+#include <stdint.h>
+#include <stdatomic.h>
+#include <sys/time.h>
+#include <time.h>
+
+#define SERVER_BACKLOG 32
+#define SERVER_SEND_MAX 4096
+#define SERVER_READ_STEPS 4096
+#define TEXT_CONTENT_TYPE "text/plain; charset=utf-8"
+#define JSON_CONTENT_TYPE "application/json; charset=utf-8"
+
+typedef struct
+{
+    int fds[SERVER_QUEUE];
+    uint32_t ips[SERVER_QUEUE];
+    int head;
+    int tail;
+    int count;
+    int stopping;
+    pthread_mutex_t lock;
+    pthread_cond_t not_empty;
+} ConnQueue;
+
+typedef struct
+{
+    uint32_t ip;
+    int socket;
+    Arena arena;
+    DynBuf req;
+} Worker;
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal stop must be lock free");
+typedef struct
+{
+    uint32_t ip;
+    int used;
+    int connections;
+    int requests;
+    time_t window;
+} ClientLimit;
+
 int client_limit(uint32_t ip, int action);
 
 int consume_message(Worker *w, const HttpRequest *req);
@@ -35,7 +82,8 @@ int serve_health(int sock, const HttpRequest *req, const char *path, int keep_al
 
 int serve_preflight(int sock, const HttpRequest *req, int keep_alive, int *status_out, int *handled);
 
-int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char *query, char *body_in, size_t body_len, int keep_alive, int *status_out);
+int serve_request(Worker *w, int sock, const HttpRequest *req, char *path, char *query, char *body_in, size_t body_len,
+                  int keep_alive, int *status_out);
 
 int set_timeout_until(int sock, int option, const struct timespec *deadline);
 
@@ -65,7 +113,7 @@ int request_header_has_token(const HttpRequest *req, const char *name, const cha
 
 extern int g_connections_per_ip;
 
-extern int          g_drain_ms;
+extern int g_drain_ms;
 
 extern int g_requests_per_minute;
 
@@ -73,9 +121,9 @@ extern _Atomic int g_stop;
 
 extern pthread_t g_worker_threads[SERVER_WORKERS];
 
-extern Worker    g_workers[SERVER_WORKERS];
+extern Worker g_workers[SERVER_WORKERS];
 
-extern int       g_workers_started;
+extern int g_workers_started;
 
 extern ClientLimit g_clients[256];
 

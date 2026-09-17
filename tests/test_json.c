@@ -27,14 +27,11 @@ int main(void)
     k = json_object_get(js, toks, n, 0, "ok");
     CHECK(k > 0 && json_token_bool_checked(js, &toks[k], &b) == 0 && b == 1);
 
-    /* nested access by path */
     k = json_path_get(js, toks, n, 0, "deep.x");
     CHECK(k > 0 && json_token_long_checked(js, &toks[k], &v) == 0 && v == 7);
 
-    /* a missing key is not found */
     CHECK(json_object_get(js, toks, n, 0, "nope") <= 0);
 
-    /* malformed input is rejected */
     const char *bad = "{\"a\":,}";
     CHECK(json_parse(bad, strlen(bad), toks, 256) <= 0);
     const char *unterminated = "{\"a\":\"b";
